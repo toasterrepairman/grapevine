@@ -4,6 +4,8 @@ use libadwaita::{prelude::*, ViewSwitcher, HeaderBar, ToolbarView, ApplicationWi
 use libshumate::prelude::{MarkerExt, LocationExt};
 use serde::Deserialize;
 use std::collections::{HashSet, HashMap};
+use std::cell::RefCell;
+use std::rc::Rc;
 use chrono::NaiveDateTime;
 
 const APP_ID: &str = "com.example.Grapevine";
@@ -59,8 +61,17 @@ fn build_ui(app: &Application) {
     let stack = ViewStack::builder()
         .build();
 
+    // Create shared state for refresh functionality
+    let current_query = Rc::new(RefCell::new(String::new()));
+    let results_list_ref = Rc::new(RefCell::new(None::<ListBox>));
+    let marker_layer_ref = Rc::new(RefCell::new(None::<libshumate::MarkerLayer>));
+
     // Create Global Affairs view with map
-    let global_affairs_view = create_global_affairs_view();
+    let global_affairs_view = create_global_affairs_view(
+        current_query.clone(),
+        results_list_ref.clone(),
+        marker_layer_ref.clone()
+    );
     stack.add_titled(&global_affairs_view, Some("global-affairs"), "Global Affairs");
 
     // Create Firehose view
@@ -87,6 +98,29 @@ fn build_ui(app: &Application) {
     // Create header bar
     let header_bar = HeaderBar::builder()
         .build();
+
+    // Create refresh button
+    let refresh_button = gtk::Button::builder()
+        .icon_name("view-refresh-symbolic")
+        .tooltip_text("Refresh articles")
+        .build();
+
+    // Connect refresh button to trigger a new search
+    let current_query_clone = current_query.clone();
+    let results_list_ref_clone = results_list_ref.clone();
+    let marker_layer_ref_clone = marker_layer_ref.clone();
+    refresh_button.connect_clicked(move |_| {
+        let query = current_query_clone.borrow().clone();
+        if let Some(results_list) = results_list_ref_clone.borrow().as_ref() {
+            let results_list = results_list.clone();
+            let marker_layer = marker_layer_ref_clone.borrow().clone();
+            glib::spawn_future_local(async move {
+                fetch_gdelt_articles(&query, results_list, marker_layer).await;
+            });
+        }
+    });
+
+    header_bar.pack_start(&refresh_button);
 
     // Create toolbar view to contain everything
     let toolbar_view = ToolbarView::builder()
@@ -143,7 +177,11 @@ fn build_ui(app: &Application) {
     window.present();
 }
 
-fn create_global_affairs_view() -> gtk::Box {
+fn create_global_affairs_view(
+    current_query: Rc<RefCell<String>>,
+    results_list_ref: Rc<RefCell<Option<ListBox>>>,
+    marker_layer_ref: Rc<RefCell<Option<libshumate::MarkerLayer>>>,
+) -> gtk::Box {
     // Create a responsive container that switches orientation based on window size
     let container = gtk::Box::builder()
         .orientation(Orientation::Vertical)
@@ -174,6 +212,9 @@ fn create_global_affairs_view() -> gtk::Box {
         .selection_mode(gtk::SelectionMode::None)
         .build();
     results_list.add_css_class("boxed-list");
+
+    // Store results_list in the shared reference
+    *results_list_ref.borrow_mut() = Some(results_list.clone());
 
     scrollbox_content.append(&search_entry);
     scrollbox_content.append(&results_list);
@@ -214,6 +255,9 @@ fn create_global_affairs_view() -> gtk::Box {
         None
     };
 
+    // Store marker layer in the shared reference
+    *marker_layer_ref.borrow_mut() = marker_layer_opt.clone();
+
     // Make the map expand to fill the space
     map.set_vexpand(true);
     map.set_hexpand(true);
@@ -227,11 +271,32 @@ fn create_global_affairs_view() -> gtk::Box {
         fetch_gdelt_articles("", results_list_clone, marker_layer_clone).await;
     });
 
+    // Set up automatic refresh every 15 minutes
+    let current_query_for_refresh = current_query.clone();
+    let results_list_for_refresh = results_list.clone();
+    let marker_layer_for_refresh = marker_layer_opt.clone();
+    glib::timeout_add_seconds_local(15 * 60, move || {
+        let query = current_query_for_refresh.borrow().clone();
+        let results_list = results_list_for_refresh.clone();
+        let marker_layer = marker_layer_for_refresh.clone();
+
+        glib::spawn_future_local(async move {
+            fetch_gdelt_articles(&query, results_list, marker_layer).await;
+        });
+
+        glib::ControlFlow::Continue
+    });
+
     // Set up search entry activation
     let results_list_for_search = results_list.clone();
     let marker_layer_for_search = marker_layer_opt.clone();
+    let current_query_for_search = current_query.clone();
     search_entry.connect_activate(move |entry| {
         let query = entry.text().to_string();
+
+        // Update the current query
+        *current_query_for_search.borrow_mut() = query.clone();
+
         let results_list = results_list_for_search.clone();
         let marker_layer = marker_layer_for_search.clone();
 
