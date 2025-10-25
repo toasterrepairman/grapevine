@@ -126,9 +126,10 @@ fn build_ui(app: &Application) {
             background-color: alpha(@accent_bg_color, 0.95);
             box-shadow: 0 3px 8px alpha(black, 0.5);
         }
-        .map-popover {
-            background-color: alpha(@window_bg_color, 0.92);
-            backdrop-filter: blur(10px);
+        .map-popover > contents {
+            background-color: alpha(@card_bg_color, 0.95);
+            border-radius: 12px;
+            box-shadow: 0 4px 16px alpha(black, 0.6);
         }"
     );
 
@@ -200,7 +201,7 @@ fn create_global_affairs_view() -> gtk::Box {
             // Set zoom level constraints on the viewport to prevent excessive wrapping
             // Min zoom 1 (whole world visible), max zoom 10 (reasonable detail)
             viewport.set_min_zoom_level(1);
-            viewport.set_max_zoom_level(10);
+            viewport.set_max_zoom_level(6);
 
             // Set initial zoom level to 2 (good overview of world)
             map_view.go_to_full(0.0, 0.0, 2.0);
@@ -331,12 +332,17 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
     }
 
     // Show loading indicator
-    let loading_label = Label::builder()
-        .label("Loading...")
+    let loading_row = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
         .margin_top(12)
         .margin_bottom(12)
         .build();
-    results_list.append(&loading_label);
+
+    let loading_label = Label::builder()
+        .label("Loading...")
+        .build();
+    loading_row.append(&loading_label);
+    results_list.append(&loading_row);
 
     // GDELT requires non-empty queries, use a default search term
     let search_query = if query.is_empty() { "news" } else { query };
@@ -361,8 +367,10 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                     // Try to parse the JSON
                     match serde_json::from_str::<GdeltResponse>(&text) {
                         Ok(data) => {
-                            // Remove loading indicator BEFORE adding new content
-                            results_list.remove(&loading_label);
+                            // Clear all children (including loading indicator)
+                            while let Some(child) = results_list.first_child() {
+                                results_list.remove(&child);
+                            }
 
                             if data.articles.is_empty() {
                                 let no_results = Label::builder()
@@ -372,17 +380,21 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                                     .build();
                                 results_list.append(&no_results);
                             } else {
+                                // Sort articles by seendate (most recent first)
+                                let mut sorted_articles = data.articles.clone();
+                                sorted_articles.sort_by(|a, b| b.seendate.cmp(&a.seendate));
+
                                 // Deduplicate by domain - only show one article per source
                                 let mut seen_domains = HashSet::new();
                                 let mut unique_articles = Vec::new();
 
-                                for article in data.articles.iter() {
+                                for article in sorted_articles.iter() {
                                     if !seen_domains.contains(&article.domain) {
                                         seen_domains.insert(article.domain.clone());
                                         unique_articles.push(article);
 
-                                        // Stop once we have 10 unique sources
-                                        if unique_articles.len() >= 10 {
+                                        // Stop once we have 25 unique sources
+                                        if unique_articles.len() >= 25 {
                                             break;
                                         }
                                     }
@@ -424,7 +436,10 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                             }
                         }
                         Err(e) => {
-                            results_list.remove(&loading_label);
+                            // Clear all children (including loading indicator)
+                            while let Some(child) = results_list.first_child() {
+                                results_list.remove(&child);
+                            }
                             eprintln!("JSON parse error: {}", e);
                             let error_label = Label::builder()
                                 .label(&format!("Error parsing response: {}", e))
@@ -437,7 +452,10 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                     }
                 }
                 Err(e) => {
-                    results_list.remove(&loading_label);
+                    // Clear all children (including loading indicator)
+                    while let Some(child) = results_list.first_child() {
+                        results_list.remove(&child);
+                    }
                     eprintln!("Error reading response text: {}", e);
                     let error_label = Label::builder()
                         .label(&format!("Error reading response: {}", e))
@@ -449,7 +467,10 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
             }
         }
         Err(e) => {
-            results_list.remove(&loading_label);
+            // Clear all children (including loading indicator)
+            while let Some(child) = results_list.first_child() {
+                results_list.remove(&child);
+            }
             eprintln!("Error fetching articles: {}", e);
             let error_label = Label::builder()
                 .label(&format!("Error fetching articles: {}", e))
@@ -611,9 +632,13 @@ fn create_country_marker(
         .spacing(8)
         .build();
 
+    // Sort articles by seendate (most recent first)
+    let mut sorted_articles = articles.to_vec();
+    sorted_articles.sort_by(|a, b| b.seendate.cmp(&a.seendate));
+
     // Add each article to the popover
-    eprintln!("  Adding {} articles to popover for {}", articles.len(), country_code);
-    for article in articles {
+    eprintln!("  Adding {} articles to popover for {}", sorted_articles.len(), country_code);
+    for article in sorted_articles.iter() {
         let article_widget = create_popover_article_row(article);
         articles_box.append(&article_widget);
     }
