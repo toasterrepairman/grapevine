@@ -103,7 +103,7 @@ fn build_ui(app: &Application) {
         .default_height(600)
         .build();
 
-    // Load custom CSS for floating switcher styling
+    // Load custom CSS for floating switcher and map markers
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_data(
         ".floating-switcher {
@@ -111,6 +111,24 @@ fn build_ui(app: &Application) {
             border-radius: 12px;
             padding: 8px;
             box-shadow: 0 4px 12px alpha(black, 0.3);
+        }
+        .map-marker {
+            background-color: alpha(@accent_bg_color, 0.75);
+            border-radius: 16px;
+            padding: 4px 10px;
+            font-size: 11px;
+            font-weight: bold;
+            min-height: 0;
+            min-width: 0;
+            box-shadow: 0 2px 6px alpha(black, 0.4);
+        }
+        .map-marker:hover {
+            background-color: alpha(@accent_bg_color, 0.95);
+            box-shadow: 0 3px 8px alpha(black, 0.5);
+        }
+        .map-popover {
+            background-color: alpha(@window_bg_color, 0.92);
+            backdrop-filter: blur(10px);
         }"
     );
 
@@ -540,38 +558,50 @@ fn create_country_marker(
 ) {
     eprintln!("  Creating marker button for {}", country_code);
 
+    // Create a more compact label - use abbreviated names for long countries
+    let display_name = match country_code {
+        "United States" => "US",
+        "United Kingdom" => "UK",
+        "United Arab Emirates" => "UAE",
+        "South Africa" => "S. Africa",
+        "South Korea" => "S. Korea",
+        "New Zealand" => "NZ",
+        "Saudi Arabia" => "Saudi",
+        _ => country_code,
+    };
+
     // Create a button to serve as the marker
     let marker_button = gtk::Button::builder()
-        .label(&format!("{} ({})", country_code, articles.len()))
+        .label(&format!("{} {}", display_name, articles.len()))
         .build();
-    marker_button.add_css_class("pill");
-    marker_button.add_css_class("suggested-action");
+    marker_button.add_css_class("map-marker");
 
     // Create a popover to show articles
     let popover = Popover::builder()
         .build();
+    popover.add_css_class("map-popover");
 
     // Create content for the popover
     let popover_box = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(8)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
+        .spacing(6)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(8)
+        .margin_end(8)
         .build();
 
     // Add country header
     let country_label = Label::builder()
         .label(&format!("Articles from {}", country_code))
         .build();
-    country_label.add_css_class("heading");
+    country_label.add_css_class("title-4");
     popover_box.append(&country_label);
 
     // Create a scrolled window for the articles
     let scrolled = ScrolledWindow::builder()
-        .max_content_height(400)
-        .max_content_width(350)
+        .max_content_height(300)
+        .max_content_width(280)
         .propagate_natural_width(true)
         .propagate_natural_height(true)
         .build();
@@ -617,7 +647,11 @@ fn create_country_marker(
 fn create_popover_article_row(article: &GdeltArticle) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(4)
+        .spacing(2)
+        .margin_top(4)
+        .margin_bottom(4)
+        .margin_start(4)
+        .margin_end(4)
         .build();
 
     // Article title
@@ -626,9 +660,9 @@ fn create_popover_article_row(article: &GdeltArticle) -> gtk::Box {
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .xalign(0.0)
-        .max_width_chars(40)
+        .max_width_chars(35)
         .build();
-    title_label.add_css_class("body");
+    title_label.add_css_class("caption");
 
     // Domain
     let domain_label = Label::builder()
