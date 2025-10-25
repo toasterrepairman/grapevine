@@ -1,12 +1,10 @@
 use gtk::prelude::*;
 use gtk::{glib, Application, Label, Orientation, ScrolledWindow, Align, SearchEntry, ListBox, Popover};
-use libadwaita::{prelude::*, ViewSwitcher, HeaderBar, ToolbarView, ApplicationWindow, ViewStack, StyleManager, ColorScheme, Breakpoint, BreakpointCondition};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use libadwaita::{prelude::*, ViewSwitcher, HeaderBar, ToolbarView, ApplicationWindow, ViewStack, StyleManager, ColorScheme};
+use libshumate::prelude::{MarkerExt, LocationExt};
+use serde::Deserialize;
 use std::collections::{HashSet, HashMap};
-use chrono::{DateTime, NaiveDateTime};
-use std::rc::Rc;
-use std::cell::RefCell;
+use chrono::NaiveDateTime;
 
 const APP_ID: &str = "com.example.Grapevine";
 const GDELT_API_URL: &str = "https://api.gdeltproject.org/api/v2/doc/doc";
@@ -162,25 +160,6 @@ fn create_global_affairs_view() -> gtk::Box {
     scrollbox_content.append(&results_list);
     scrolled_window.set_child(Some(&scrollbox_content));
 
-    // Clone for async callbacks
-    let results_list_clone = results_list.clone();
-
-    // Perform initial search with empty query to get latest news
-    glib::spawn_future_local(async move {
-        fetch_gdelt_articles("", results_list_clone).await;
-    });
-
-    // Set up search entry activation
-    let results_list_for_search = results_list.clone();
-    search_entry.connect_activate(move |entry| {
-        let query = entry.text().to_string();
-        let results_list = results_list_for_search.clone();
-
-        glib::spawn_future_local(async move {
-            fetch_gdelt_articles(&query, results_list).await;
-        });
-    });
-
     // Create the map widget using libshumate
     let map = libshumate::SimpleMap::new();
 
@@ -191,22 +170,56 @@ fn create_global_affairs_view() -> gtk::Box {
 
     map.set_map_source(Some(&map_source));
 
-    // Configure the map view with initial position and zoom constraints
-    if let Some(map_view) = map.map() {
-        // Set zoom level constraints on the viewport to prevent excessive wrapping
+    // Get the viewport to create the marker layer
+    let marker_layer_opt = if let Some(map_view) = map.map() {
         if let Some(viewport) = map_view.viewport() {
-            // Min zoom 1 (whole world visible), max zoom 6 (reasonable detail)
+            // Create a marker layer for country markers
+            let marker_layer = libshumate::MarkerLayer::new(&viewport);
+
+            // Add the marker layer to the map
+            map_view.add_layer(&marker_layer);
+
+            // Set zoom level constraints on the viewport to prevent excessive wrapping
+            // Min zoom 1 (whole world visible), max zoom 10 (reasonable detail)
             viewport.set_min_zoom_level(1);
             viewport.set_max_zoom_level(10);
-        }
 
-        // Set initial zoom level to 2 (good overview of world)
-        map_view.go_to_full(0.0, 0.0, 2.0);
-    }
+            // Set initial zoom level to 2 (good overview of world)
+            map_view.go_to_full(0.0, 0.0, 2.0);
+
+            Some(marker_layer)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Make the map expand to fill the space
     map.set_vexpand(true);
     map.set_hexpand(true);
+
+    // Clone marker layer for use in async callback
+    let marker_layer_clone = marker_layer_opt.clone();
+    let results_list_clone = results_list.clone();
+
+    // Perform initial search with empty query to get latest news
+    glib::spawn_future_local(async move {
+        fetch_gdelt_articles("", results_list_clone, marker_layer_clone).await;
+    });
+
+    // Set up search entry activation
+    let results_list_for_search = results_list.clone();
+    let marker_layer_for_search = marker_layer_opt.clone();
+    search_entry.connect_activate(move |entry| {
+        let query = entry.text().to_string();
+        let results_list = results_list_for_search.clone();
+        let marker_layer = marker_layer_for_search.clone();
+
+        glib::spawn_future_local(async move {
+            fetch_gdelt_articles(&query, results_list, marker_layer).await;
+        });
+    });
 
     // Create an orientable paned widget for responsive layout
     let paned = gtk::Paned::builder()
@@ -288,10 +301,15 @@ fn create_firehose_view() -> gtk::Box {
     container
 }
 
-async fn fetch_gdelt_articles(query: &str, results_list: ListBox) {
+async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: Option<libshumate::MarkerLayer>) {
     // Clear existing results
     while let Some(child) = results_list.first_child() {
         results_list.remove(&child);
+    }
+
+    // Clear existing markers if marker layer is provided
+    if let Some(ref layer) = marker_layer {
+        layer.remove_all();
     }
 
     // Show loading indicator
@@ -353,9 +371,37 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox) {
                                 }
 
                                 // Display deduplicated articles
-                                for article in unique_articles {
+                                for article in unique_articles.iter() {
                                     let article_row = create_article_row(article);
                                     results_list.append(&article_row);
+                                }
+
+                                // Group articles by country and place markers on the map
+                                if let Some(ref layer) = marker_layer {
+                                    let mut articles_by_country: HashMap<String, Vec<GdeltArticle>> = HashMap::new();
+
+                                    // Group ALL articles by country (not just unique ones)
+                                    for article in data.articles.iter() {
+                                        if !article.sourcecountry.is_empty() {
+                                            articles_by_country
+                                                .entry(article.sourcecountry.clone())
+                                                .or_insert_with(Vec::new)
+                                                .push(article.clone());
+                                        }
+                                    }
+
+                                    eprintln!("Found {} countries with articles", articles_by_country.len());
+
+                                    // Create markers for each country
+                                    for (country_code, articles) in articles_by_country.iter() {
+                                        if let Some((lat, lon)) = get_country_coordinates(country_code) {
+                                            eprintln!("Creating marker for {} with {} articles at ({}, {})",
+                                                     country_code, articles.len(), lat, lon);
+                                            create_country_marker(layer, country_code, lat, lon, articles);
+                                        } else {
+                                            eprintln!("No coordinates found for country code: {}", country_code);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -482,4 +528,278 @@ fn parse_gdelt_timestamp(timestamp: &str) -> String {
         // Fallback if parsing fails
         timestamp.to_string()
     }
+}
+
+/// Create a marker for a country with a popover showing articles
+fn create_country_marker(
+    marker_layer: &libshumate::MarkerLayer,
+    country_code: &str,
+    lat: f64,
+    lon: f64,
+    articles: &[GdeltArticle]
+) {
+    eprintln!("  Creating marker button for {}", country_code);
+
+    // Create a button to serve as the marker
+    let marker_button = gtk::Button::builder()
+        .label(&format!("{} ({})", country_code, articles.len()))
+        .build();
+    marker_button.add_css_class("pill");
+    marker_button.add_css_class("suggested-action");
+
+    // Create a popover to show articles
+    let popover = Popover::builder()
+        .build();
+
+    // Create content for the popover
+    let popover_box = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(8)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+
+    // Add country header
+    let country_label = Label::builder()
+        .label(&format!("Articles from {}", country_code))
+        .build();
+    country_label.add_css_class("heading");
+    popover_box.append(&country_label);
+
+    // Create a scrolled window for the articles
+    let scrolled = ScrolledWindow::builder()
+        .max_content_height(400)
+        .max_content_width(350)
+        .propagate_natural_width(true)
+        .propagate_natural_height(true)
+        .build();
+
+    let articles_box = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(8)
+        .build();
+
+    // Add each article to the popover
+    eprintln!("  Adding {} articles to popover for {}", articles.len(), country_code);
+    for article in articles {
+        let article_widget = create_popover_article_row(article);
+        articles_box.append(&article_widget);
+    }
+
+    scrolled.set_child(Some(&articles_box));
+    popover_box.append(&scrolled);
+
+    popover.set_child(Some(&popover_box));
+    popover.set_parent(&marker_button);
+
+    // Connect button click to show popover
+    let country_code_clone = country_code.to_string();
+    marker_button.connect_clicked(move |_| {
+        eprintln!("Marker clicked for {}", country_code_clone);
+        popover.popup();
+    });
+
+    // Create the marker
+    let marker = libshumate::Marker::new();
+    marker.set_child(Some(&marker_button));
+    marker.set_location(lat, lon);
+
+    eprintln!("  Adding marker to layer for {}", country_code);
+    // Add marker to the layer
+    marker_layer.add_marker(&marker);
+
+    eprintln!("  Marker added successfully for {}", country_code);
+}
+
+/// Create a compact article row for the popover
+fn create_popover_article_row(article: &GdeltArticle) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(4)
+        .build();
+
+    // Article title
+    let title_label = Label::builder()
+        .label(&article.title)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .max_width_chars(40)
+        .build();
+    title_label.add_css_class("body");
+
+    // Domain
+    let domain_label = Label::builder()
+        .label(&article.domain)
+        .xalign(0.0)
+        .build();
+    domain_label.add_css_class("dim-label");
+    domain_label.add_css_class("caption");
+
+    row.append(&title_label);
+    row.append(&domain_label);
+
+    // Make the row clickable
+    let gesture = gtk::GestureClick::new();
+    let url = article.url.clone();
+    gesture.connect_released(move |_, _, _, _| {
+        if let Err(e) = open::that(&url) {
+            eprintln!("Failed to open URL: {}", e);
+        }
+    });
+    row.add_controller(gesture);
+
+    // Add hover styling
+    row.add_css_class("activatable");
+
+    row
+}
+
+/// Get approximate coordinates for a country code or name
+/// Returns (latitude, longitude) or None if country is unknown
+fn get_country_coordinates(country: &str) -> Option<(f64, f64)> {
+    // Map of country codes and names to approximate center coordinates
+    let coords: HashMap<&str, (f64, f64)> = [
+        // Country codes
+        ("US", (37.0902, -95.7129)),
+        ("GB", (55.3781, -3.4360)),
+        ("CA", (56.1304, -106.3468)),
+        ("AU", (-25.2744, 133.7751)),
+        ("DE", (51.1657, 10.4515)),
+        ("FR", (46.2276, 2.2137)),
+        ("IT", (41.8719, 12.5674)),
+        ("ES", (40.4637, -3.7492)),
+        ("RU", (61.5240, 105.3188)),
+        ("CN", (35.8617, 104.1954)),
+        ("JP", (36.2048, 138.2529)),
+        ("IN", (20.5937, 78.9629)),
+        ("BR", (-14.2350, -51.9253)),
+        ("MX", (23.6345, -102.5528)),
+        ("AR", (-38.4161, -63.6167)),
+        ("ZA", (-30.5595, 22.9375)),
+        ("EG", (26.8206, 30.8025)),
+        ("NG", (9.0820, 8.6753)),
+        ("KE", (-0.0236, 37.9062)),
+        ("SA", (23.8859, 45.0792)),
+        ("AE", (23.4241, 53.8478)),
+        ("TR", (38.9637, 35.2433)),
+        ("IL", (31.0461, 34.8516)),
+        ("SE", (60.1282, 18.6435)),
+        ("NO", (60.4720, 8.4689)),
+        ("FI", (61.9241, 25.7482)),
+        ("DK", (56.2639, 9.5018)),
+        ("NL", (52.1326, 5.2913)),
+        ("BE", (50.5039, 4.4699)),
+        ("CH", (46.8182, 8.2275)),
+        ("AT", (47.5162, 14.5501)),
+        ("PL", (51.9194, 19.1451)),
+        ("CZ", (49.8175, 15.4730)),
+        ("GR", (39.0742, 21.8243)),
+        ("PT", (39.3999, -8.2245)),
+        ("IE", (53.4129, -8.2439)),
+        ("NZ", (-40.9006, 174.8860)),
+        ("SG", (1.3521, 103.8198)),
+        ("HK", (22.3193, 114.1694)),
+        ("KR", (35.9078, 127.7669)),
+        ("TH", (15.8700, 100.9925)),
+        ("MY", (4.2105, 101.9758)),
+        ("ID", (-0.7893, 113.9213)),
+        ("PH", (12.8797, 121.7740)),
+        ("VN", (14.0583, 108.2772)),
+        ("UA", (48.3794, 31.1656)),
+        ("RO", (45.9432, 24.9668)),
+        ("HU", (47.1625, 19.5033)),
+        ("CL", (-35.6751, -71.5430)),
+        ("CO", (4.5709, -74.2973)),
+        ("PE", (-9.1900, -75.0152)),
+        ("VE", (6.4238, -66.5897)),
+        ("PK", (30.3753, 69.3451)),
+        ("BD", (23.6850, 90.3563)),
+        ("NG", (9.0820, 8.6753)),
+        ("ET", (9.1450, 40.4897)),
+        ("KR", (35.9078, 127.7669)),
+        ("IR", (32.4279, 53.6880)),
+        ("IQ", (33.2232, 43.6793)),
+        ("AF", (33.9391, 67.7100)),
+        ("QA", (25.3548, 51.1839)),
+        ("KW", (29.3117, 47.4818)),
+        ("OM", (21.4735, 55.9754)),
+        ("LB", (33.8547, 35.8623)),
+        ("JO", (30.5852, 36.2384)),
+        ("SY", (34.8021, 38.9968)),
+        ("YE", (15.5527, 48.5164)),
+        ("TW", (23.6978, 120.9605)),
+
+        // Full country names (what GDELT returns)
+        ("United States", (37.0902, -95.7129)),
+        ("United Kingdom", (55.3781, -3.4360)),
+        ("Canada", (56.1304, -106.3468)),
+        ("Australia", (-25.2744, 133.7751)),
+        ("Germany", (51.1657, 10.4515)),
+        ("France", (46.2276, 2.2137)),
+        ("Italy", (41.8719, 12.5674)),
+        ("Spain", (40.4637, -3.7492)),
+        ("Russia", (61.5240, 105.3188)),
+        ("China", (35.8617, 104.1954)),
+        ("Japan", (36.2048, 138.2529)),
+        ("India", (20.5937, 78.9629)),
+        ("Brazil", (-14.2350, -51.9253)),
+        ("Mexico", (23.6345, -102.5528)),
+        ("Argentina", (-38.4161, -63.6167)),
+        ("South Africa", (-30.5595, 22.9375)),
+        ("Egypt", (26.8206, 30.8025)),
+        ("Nigeria", (9.0820, 8.6753)),
+        ("Kenya", (-0.0236, 37.9062)),
+        ("Saudi Arabia", (23.8859, 45.0792)),
+        ("United Arab Emirates", (23.4241, 53.8478)),
+        ("Turkey", (38.9637, 35.2433)),
+        ("Israel", (31.0461, 34.8516)),
+        ("Sweden", (60.1282, 18.6435)),
+        ("Norway", (60.4720, 8.4689)),
+        ("Finland", (61.9241, 25.7482)),
+        ("Denmark", (56.2639, 9.5018)),
+        ("Netherlands", (52.1326, 5.2913)),
+        ("Belgium", (50.5039, 4.4699)),
+        ("Switzerland", (46.8182, 8.2275)),
+        ("Austria", (47.5162, 14.5501)),
+        ("Poland", (51.9194, 19.1451)),
+        ("Czech Republic", (49.8175, 15.4730)),
+        ("Greece", (39.0742, 21.8243)),
+        ("Portugal", (39.3999, -8.2245)),
+        ("Ireland", (53.4129, -8.2439)),
+        ("New Zealand", (-40.9006, 174.8860)),
+        ("Singapore", (1.3521, 103.8198)),
+        ("Hong Kong", (22.3193, 114.1694)),
+        ("South Korea", (35.9078, 127.7669)),
+        ("Thailand", (15.8700, 100.9925)),
+        ("Malaysia", (4.2105, 101.9758)),
+        ("Indonesia", (-0.7893, 113.9213)),
+        ("Philippines", (12.8797, 121.7740)),
+        ("Vietnam", (14.0583, 108.2772)),
+        ("Ukraine", (48.3794, 31.1656)),
+        ("Romania", (45.9432, 24.9668)),
+        ("Hungary", (47.1625, 19.5033)),
+        ("Chile", (-35.6751, -71.5430)),
+        ("Colombia", (4.5709, -74.2973)),
+        ("Peru", (-9.1900, -75.0152)),
+        ("Venezuela", (6.4238, -66.5897)),
+        ("Pakistan", (30.3753, 69.3451)),
+        ("Bangladesh", (23.6850, 90.3563)),
+        ("Ethiopia", (9.1450, 40.4897)),
+        ("Iran", (32.4279, 53.6880)),
+        ("Iraq", (33.2232, 43.6793)),
+        ("Afghanistan", (33.9391, 67.7100)),
+        ("Qatar", (25.3548, 51.1839)),
+        ("Kuwait", (29.3117, 47.4818)),
+        ("Oman", (21.4735, 55.9754)),
+        ("Lebanon", (33.8547, 35.8623)),
+        ("Jordan", (30.5852, 36.2384)),
+        ("Syria", (34.8021, 38.9968)),
+        ("Yemen", (15.5527, 48.5164)),
+        ("Taiwan", (23.6978, 120.9605)),
+    ].iter().cloned().collect();
+
+    coords.get(country).copied()
 }
