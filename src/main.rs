@@ -1,10 +1,12 @@
 use gtk::prelude::*;
-use gtk::{glib, Application, Label, Orientation, ScrolledWindow, Align, SearchEntry, ListBox};
+use gtk::{glib, Application, Label, Orientation, ScrolledWindow, Align, SearchEntry, ListBox, Popover};
 use libadwaita::{prelude::*, ViewSwitcher, HeaderBar, ToolbarView, ApplicationWindow, ViewStack, StyleManager, ColorScheme, Breakpoint, BreakpointCondition};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use chrono::{DateTime, NaiveDateTime};
+use std::rc::Rc;
+use std::cell::RefCell;
 
 const APP_ID: &str = "com.example.Grapevine";
 const GDELT_API_URL: &str = "https://api.gdeltproject.org/api/v2/doc/doc";
