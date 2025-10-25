@@ -690,18 +690,39 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
     let main_filter_keyword_clone = main_filter_keyword.clone();
     let control_clone = control.clone();
 
-    // Set up receiver to handle incoming messages
+    // Create a buffer for batching messages
+    let message_buffer = Rc::new(RefCell::new(Vec::new()));
+    let message_buffer_clone = message_buffer.clone();
+
+    // Set up receiver to collect incoming messages into buffer
     glib::spawn_future_local(async move {
         while let Ok(message) = rx.recv_async().await {
-            // Add to main list if it matches the main filter
-            let main_keyword = main_filter_keyword_clone.borrow().clone();
-            if main_keyword.is_empty() || message.to_lowercase().contains(&main_keyword.to_lowercase()) {
-                add_message_to_list(&main_list_clone, &message);
+            message_buffer_clone.borrow_mut().push(message);
+        }
+    });
+
+    // Set up a timer to process batched messages 5 times per second (every 200ms)
+    glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+        let mut buffer = message_buffer.borrow_mut();
+
+        if !buffer.is_empty() {
+            // Process all buffered messages
+            for message in buffer.iter() {
+                // Add to main list if it matches the main filter
+                let main_keyword = main_filter_keyword_clone.borrow().clone();
+                if main_keyword.is_empty() || message.to_lowercase().contains(&main_keyword.to_lowercase()) {
+                    add_message_to_list(&main_list_clone, message);
+                }
+
+                // Broadcast to all splits
+                control_clone.broadcast_message(message);
             }
 
-            // Broadcast to all splits
-            control_clone.broadcast_message(&message);
+            // Clear the buffer
+            buffer.clear();
         }
+
+        glib::ControlFlow::Continue
     });
 
     // Start the Jetstream connection in a background task

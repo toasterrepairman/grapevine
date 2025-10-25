@@ -43,6 +43,7 @@
         bubblewrap
         xdg-dbus-proxy
         libshumate
+        perl
       ];
 
       rustPlatform = pkgs.makeRustPlatform {
