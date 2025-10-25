@@ -863,8 +863,9 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
     let search_query = if query.is_empty() { "news" } else { query };
 
     // Build the API URL with English language filter - request more to allow deduplication
+    // Use timespan=1h to get only the most recent articles
     let url = format!(
-        "{}?query={} sourcelang:english&mode=artlist&maxrecords=50&timespan=7d&format=json",
+        "{}?query={} sourcelang:english&mode=artlist&maxrecords=100&timespan=2h&format=json",
         GDELT_API_URL,
         urlencoding::encode(search_query)
     );
