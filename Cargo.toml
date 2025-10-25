@@ -7,3 +7,10 @@ edition = "2021"
 gtk = { version = "0.10.1", package = "gtk4", features = ["v4_10"] }
 libadwaita = { version = "0.8", features = ["v1_4"] }
 libshumate = "0.7.0"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+urlencoding = "2.1"
+open = "5.0"
+chrono = "0.4"
