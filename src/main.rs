@@ -72,11 +72,13 @@ fn build_ui(app: &Application) {
         results_list_ref.clone(),
         marker_layer_ref.clone()
     );
-    stack.add_titled(&global_affairs_view, Some("global-affairs"), "Global Affairs");
+    let global_affairs_page = stack.add_titled(&global_affairs_view, Some("global-affairs"), "Global Affairs");
+    stack.page(&global_affairs_view).set_icon_name(None);
 
     // Create Firehose view
     let firehose_view = create_firehose_view();
-    stack.add_titled(&firehose_view, Some("firehose"), "Firehose");
+    let firehose_page = stack.add_titled(&firehose_view, Some("firehose"), "Firehose");
+    stack.page(&firehose_view).set_icon_name(None);
 
     // Create floating ViewSwitcher (compact version)
     let view_switcher = ViewSwitcher::builder()
@@ -338,7 +340,7 @@ fn create_global_affairs_view(
                 if should_be_horizontal != is_horizontal {
                     if should_be_horizontal {
                         paned.set_orientation(Orientation::Horizontal);
-                        paned.set_position(width - 300); // 300px from right for scrollbox
+                        paned.set_position(width - 500); // 250px from right for scrollbox
                     } else {
                         paned.set_orientation(Orientation::Vertical);
                         paned.set_position(200); // 200px from top for scrollbox
