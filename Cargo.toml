@@ -14,3 +14,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 urlencoding = "2.1"
 open = "5.0"
 chrono = "0.4"
+jetstream-oxide = "0.1.2"
+atrium-api = "0.25"
+anyhow = "1.0"
+flume = "0.11"

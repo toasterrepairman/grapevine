@@ -7,6 +7,12 @@ use std::collections::{HashSet, HashMap};
 use std::cell::RefCell;
 use std::rc::Rc;
 use chrono::NaiveDateTime;
+use jetstream_oxide::{
+    events::{JetstreamEvent, commit::CommitEvent},
+    DefaultJetstreamEndpoints, JetstreamCompression, JetstreamConfig, JetstreamConnector,
+};
+use atrium_api::record::KnownRecord;
+use atrium_api::types::string::Nsid;
 
 const APP_ID: &str = "com.example.Grapevine";
 const GDELT_API_URL: &str = "https://api.gdeltproject.org/api/v2/doc/doc";
@@ -72,12 +78,12 @@ fn build_ui(app: &Application) {
         results_list_ref.clone(),
         marker_layer_ref.clone()
     );
-    let global_affairs_page = stack.add_titled(&global_affairs_view, Some("global-affairs"), "Global Affairs");
+    let _global_affairs_page = stack.add_titled(&global_affairs_view, Some("global-affairs"), "Global Affairs");
     stack.page(&global_affairs_view).set_icon_name(None);
 
     // Create Firehose view
-    let firehose_view = create_firehose_view();
-    let firehose_page = stack.add_titled(&firehose_view, Some("firehose"), "Firehose");
+    let (firehose_view, firehose_control) = create_firehose_view();
+    let _firehose_page = stack.add_titled(&firehose_view, Some("firehose"), "Firehose");
     stack.page(&firehose_view).set_icon_name(None);
 
     // Create floating ViewSwitcher (compact version)
@@ -101,10 +107,17 @@ fn build_ui(app: &Application) {
     let header_bar = HeaderBar::builder()
         .build();
 
-    // Create refresh button
+    // Create refresh button (for Global Affairs)
     let refresh_button = gtk::Button::builder()
         .icon_name("view-refresh-symbolic")
         .tooltip_text("Refresh articles")
+        .build();
+
+    // Create plus button (for Firehose)
+    let plus_button = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add filtered view")
+        .visible(false)
         .build();
 
     // Connect refresh button to trigger a new search
@@ -122,7 +135,31 @@ fn build_ui(app: &Application) {
         }
     });
 
+    // Connect plus button to toggle split view
+    let firehose_control_clone = firehose_control.clone();
+    plus_button.connect_clicked(move |_| {
+        firehose_control_clone.toggle_split();
+    });
+
+    // Switch buttons based on active view
+    let refresh_button_clone = refresh_button.clone();
+    let plus_button_clone = plus_button.clone();
+    stack.connect_visible_child_notify(move |stack| {
+        if let Some(visible_child) = stack.visible_child() {
+            if let Some(name) = stack.page(&visible_child).name() {
+                if name.as_str() == "firehose" {
+                    refresh_button_clone.set_visible(false);
+                    plus_button_clone.set_visible(true);
+                } else {
+                    refresh_button_clone.set_visible(true);
+                    plus_button_clone.set_visible(false);
+                }
+            }
+        }
+    });
+
     header_bar.pack_start(&refresh_button);
+    header_bar.pack_start(&plus_button);
 
     // Create toolbar view to contain everything
     let toolbar_view = ToolbarView::builder()
@@ -355,36 +392,265 @@ fn create_global_affairs_view(
     container
 }
 
-fn create_firehose_view() -> gtk::Box {
+#[derive(Clone)]
+struct FirehoseControl {
+    paned: gtk::Paned,
+    filtered_box: gtk::Box,
+    is_split: Rc<RefCell<bool>>,
+}
+
+impl FirehoseControl {
+    fn toggle_split(&self) {
+        let mut split = self.is_split.borrow_mut();
+        *split = !*split;
+
+        if *split {
+            // Show the split view
+            self.paned.set_end_child(Some(&self.filtered_box));
+            self.paned.set_resize_end_child(true);
+            self.paned.set_shrink_end_child(false);
+
+            // Set initial position based on current size
+            let width = self.paned.width();
+            let height = self.paned.height();
+            if width > height {
+                self.paned.set_orientation(Orientation::Horizontal);
+                self.paned.set_position(width / 2);
+            } else {
+                self.paned.set_orientation(Orientation::Vertical);
+                self.paned.set_position(height / 2);
+            }
+        } else {
+            // Hide the split view
+            self.paned.set_end_child(None::<&gtk::Box>);
+        }
+    }
+}
+
+fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
     let container = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(12)
+        .build();
+
+    // Create a paned widget for split view
+    let paned = gtk::Paned::builder()
+        .orientation(Orientation::Vertical)
+        .wide_handle(true)
+        .build();
+
+    // Track whether we're showing split view
+    let is_split = Rc::new(RefCell::new(false));
+
+    // Create the main firehose list
+    let main_list = ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .build();
+    main_list.add_css_class("boxed-list");
+
+    let main_scrolled = ScrolledWindow::builder()
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    main_scrolled.set_child(Some(&main_list));
+
+    // Create the filtered list (initially hidden)
+    let filtered_list = ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .build();
+    filtered_list.add_css_class("boxed-list");
+
+    let filtered_box = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(8)
         .margin_top(12)
         .margin_bottom(12)
         .margin_start(12)
         .margin_end(12)
         .build();
 
-    // Create a scrolled window for the firehose content
-    let scrolled_window = ScrolledWindow::builder()
+    let filter_search = SearchEntry::builder()
+        .placeholder_text("Filter messages by keyword...")
+        .build();
+
+    let filtered_scrolled = ScrolledWindow::builder()
         .vexpand(true)
         .hexpand(true)
         .build();
+    filtered_scrolled.set_child(Some(&filtered_list));
 
-    let firehose_content = gtk::Box::builder()
+    filtered_box.append(&filter_search);
+    filtered_box.append(&filtered_scrolled);
+
+    // Set up the paned widget
+    paned.set_start_child(Some(&main_scrolled));
+    paned.set_resize_start_child(true);
+    paned.set_shrink_start_child(false);
+
+    // Initially don't set the end child (no split)
+
+    container.append(&paned);
+
+    // Create channels for message passing
+    let (tx, rx) = flume::unbounded::<String>();
+    let filter_keyword = Rc::new(RefCell::new(String::new()));
+
+    // Store references for the UI update
+    let main_list_clone = main_list.clone();
+    let filtered_list_clone = filtered_list.clone();
+    let filter_keyword_clone = filter_keyword.clone();
+
+    // Set up receiver to handle incoming messages
+    glib::spawn_future_local(async move {
+        while let Ok(message) = rx.recv_async().await {
+            add_message_to_list(&main_list_clone, &message);
+
+            // Also add to filtered list if it matches the keyword
+            let keyword = filter_keyword_clone.borrow().clone();
+            if !keyword.is_empty() && message.to_lowercase().contains(&keyword.to_lowercase()) {
+                add_message_to_list(&filtered_list_clone, &message);
+            }
+        }
+    });
+
+    // Start the Jetstream connection in a background task
+    let tx_clone = tx.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            if let Err(e) = start_jetstream(tx_clone).await {
+                eprintln!("Jetstream error: {}", e);
+            }
+        });
+    });
+
+    // Handle filter search
+    let filtered_list_for_search = filtered_list.clone();
+    let filter_keyword_for_search = filter_keyword.clone();
+    filter_search.connect_search_changed(move |entry| {
+        let keyword = entry.text().to_string();
+        *filter_keyword_for_search.borrow_mut() = keyword;
+
+        // Clear the filtered list when search changes
+        while let Some(child) = filtered_list_for_search.first_child() {
+            filtered_list_for_search.remove(&child);
+        }
+    });
+
+    // Add tick callback for responsive orientation switching
+    let paned_weak = paned.downgrade();
+    let is_split_clone = is_split.clone();
+    paned.add_tick_callback(move |_widget, _clock| {
+        if let Some(paned) = paned_weak.upgrade() {
+            if *is_split_clone.borrow() {
+                let width = paned.width();
+                let height = paned.height();
+
+                if width > 0 && height > 0 {
+                    let should_be_horizontal = width > height;
+                    let is_horizontal = paned.orientation() == Orientation::Horizontal;
+
+                    if should_be_horizontal != is_horizontal {
+                        if should_be_horizontal {
+                            paned.set_orientation(Orientation::Horizontal);
+                            paned.set_position(width / 2);
+                        } else {
+                            paned.set_orientation(Orientation::Vertical);
+                            paned.set_position(height / 2);
+                        }
+                    }
+                }
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+
+    let control = FirehoseControl {
+        paned: paned.clone(),
+        filtered_box: filtered_box.clone(),
+        is_split: is_split.clone(),
+    };
+
+    (container, control)
+}
+
+fn add_message_to_list(list: &ListBox, message: &str) {
+    let row = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(8)
+        .spacing(4)
+        .margin_top(4)
+        .margin_bottom(4)
+        .margin_start(8)
+        .margin_end(8)
         .build();
 
-    let placeholder_label = Label::builder()
-        .label("Firehose feed will appear here")
+    let message_label = Label::builder()
+        .label(message)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
         .build();
 
-    firehose_content.append(&placeholder_label);
-    scrolled_window.set_child(Some(&firehose_content));
+    row.append(&message_label);
 
-    container.append(&scrolled_window);
-    container
+    // Prepend to show newest messages at the top
+    list.prepend(&row);
+
+    // Limit to 100 messages to prevent memory issues
+    let mut count = 0;
+    let mut child = list.first_child();
+    while let Some(current) = child {
+        count += 1;
+        if count > 100 {
+            let next = current.next_sibling();
+            list.remove(&current);
+            child = next;
+        } else {
+            child = current.next_sibling();
+        }
+    }
+}
+
+async fn start_jetstream(tx: flume::Sender<String>) -> anyhow::Result<()> {
+    let nsid: Nsid = "app.bsky.feed.post".parse()
+        .map_err(|e| anyhow::anyhow!("Failed to parse NSID: {}", e))?;
+
+    let config = JetstreamConfig {
+        endpoint: DefaultJetstreamEndpoints::USEastOne.into(),
+        wanted_collections: vec![nsid],
+        wanted_dids: vec![],
+        compression: JetstreamCompression::Zstd,
+        cursor: None,
+        max_retries: 10,
+        max_delay_ms: 30_000,
+        base_delay_ms: 1_000,
+        reset_retries_min_ms: 30_000,
+    };
+
+    let jetstream = JetstreamConnector::new(config)?;
+    let receiver = jetstream.connect().await?;
+
+    eprintln!("Connected to Bluesky Jetstream!");
+
+    while let Ok(event) = receiver.recv_async().await {
+        if let JetstreamEvent::Commit(commit_event) = event {
+            match commit_event {
+                CommitEvent::Create { commit, .. } => {
+                    if let KnownRecord::AppBskyFeedPost(post) = commit.record {
+                        let timestamp = chrono::Utc::now().format("%H:%M:%S").to_string();
+                        let message = format!("[{}] {}: {}", timestamp, commit.info.rkey, post.text);
+
+                        // Send to UI thread
+                        if tx.send(message).is_err() {
+                            break; // UI is gone, stop streaming
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: Option<libshumate::MarkerLayer>) {
