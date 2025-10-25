@@ -1,0 +1,9 @@
+[package]
+name = "grapevine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gtk = { version = "0.10.1", package = "gtk4", features = ["v4_10"] }
+libadwaita = { version = "0.8", features = ["v1_4"] }
+libshumate = "0.7.0"
