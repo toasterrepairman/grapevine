@@ -402,7 +402,8 @@ struct SplitPane {
 
 #[derive(Clone)]
 struct FirehoseControl {
-    splits_container: gtk::Box,
+    root_container: gtk::Box,
+    main_pane: SplitPane,
     splits: Rc<RefCell<Vec<SplitPane>>>,
     message_sender: flume::Sender<String>,
 }
@@ -481,19 +482,126 @@ impl FirehoseControl {
         };
 
         splits.push(split_pane);
-        self.splits_container.append(&split_box);
+
+        // Rebuild the entire paned structure
+        drop(splits); // Drop the borrow before rebuilding
+        self.rebuild_layout();
 
         // Set up close button
-        let splits_container_clone = self.splits_container.clone();
-        let splits_clone = self.splits.clone();
+        let control_clone = self.clone();
         let split_box_clone = split_box.clone();
         close_button.connect_clicked(move |_| {
             // Find and remove this split
-            let mut splits = splits_clone.borrow_mut();
+            let mut splits = control_clone.splits.borrow_mut();
             if let Some(pos) = splits.iter().position(|s| s.container == split_box_clone) {
                 splits.remove(pos);
-                splits_container_clone.remove(&split_box_clone);
+                drop(splits); // Drop the borrow before rebuilding
+                control_clone.rebuild_layout();
             }
+        });
+    }
+
+    fn rebuild_layout(&self) {
+        // Remove all children from root container
+        while let Some(child) = self.root_container.first_child() {
+            self.root_container.remove(&child);
+        }
+
+        let splits = self.splits.borrow();
+
+        // Unparent all widgets before rebuilding
+        if let Some(parent) = self.main_pane.container.parent() {
+            if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
+                paned.set_start_child(None::<&gtk::Widget>);
+                paned.set_end_child(None::<&gtk::Widget>);
+            }
+        }
+
+        for split in splits.iter() {
+            if let Some(parent) = split.container.parent() {
+                if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
+                    paned.set_start_child(None::<&gtk::Widget>);
+                    paned.set_end_child(None::<&gtk::Widget>);
+                }
+            }
+        }
+
+        if splits.is_empty() {
+            // Only show the main pane
+            self.root_container.append(&self.main_pane.container);
+        } else {
+            // Create nested paned widgets
+            let orientation = if self.root_container.width() > self.root_container.height() {
+                Orientation::Horizontal
+            } else {
+                Orientation::Vertical
+            };
+
+            // Start with the main pane
+            let mut current_widget: gtk::Widget = self.main_pane.container.clone().into();
+
+            // Add each split with a paned separator
+            for split in splits.iter() {
+                let paned = gtk::Paned::builder()
+                    .orientation(orientation)
+                    .wide_handle(true)
+                    .resize_start_child(true)
+                    .shrink_start_child(false)
+                    .resize_end_child(true)
+                    .shrink_end_child(false)
+                    .build();
+
+                paned.set_start_child(Some(&current_widget));
+                paned.set_end_child(Some(&split.container));
+
+                // Set position to split evenly
+                let paned_weak = paned.downgrade();
+                paned.add_tick_callback(move |_widget, _clock| {
+                    if let Some(paned) = paned_weak.upgrade() {
+                        let total_size = if paned.orientation() == Orientation::Horizontal {
+                            paned.width()
+                        } else {
+                            paned.height()
+                        };
+
+                        if total_size > 0 && paned.position() == 0 {
+                            paned.set_position(total_size / 2);
+                        }
+                    }
+                    glib::ControlFlow::Continue
+                });
+
+                current_widget = paned.into();
+            }
+
+            self.root_container.append(&current_widget);
+        }
+
+        // Add tick callback to handle orientation changes
+        let root_weak = self.root_container.downgrade();
+        let control_clone = self.clone();
+
+        self.root_container.add_tick_callback(move |_widget, _clock| {
+            if let Some(root) = root_weak.upgrade() {
+                let width = root.width();
+                let height = root.height();
+
+                if width > 0 && height > 0 {
+                    let should_be_horizontal = width > height;
+
+                    // Check if we need to rebuild due to orientation change
+                    if let Some(first_child) = root.first_child() {
+                        if let Some(paned) = first_child.downcast_ref::<gtk::Paned>() {
+                            let is_horizontal = paned.orientation() == Orientation::Horizontal;
+
+                            if should_be_horizontal != is_horizontal {
+                                control_clone.rebuild_layout();
+                            }
+                        }
+                    }
+                }
+            }
+            glib::ControlFlow::Continue
         });
     }
 
@@ -513,11 +621,12 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
         .orientation(Orientation::Vertical)
         .build();
 
-    // Create a horizontal box to hold all panes (main + splits)
-    let panes_container = gtk::Box::builder()
+    // Create root container that will hold the dynamic paned structure
+    let root_container = gtk::Box::builder()
         .orientation(Orientation::Horizontal)
         .spacing(0)
-        .homogeneous(true)
+        .hexpand(true)
+        .vexpand(true)
         .build();
 
     // Create the main firehose box with search entry
@@ -529,6 +638,7 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
         .margin_start(12)
         .margin_end(12)
         .hexpand(true)
+        .vexpand(true)
         .build();
 
     let main_search = SearchEntry::builder()
@@ -550,27 +660,27 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
     main_box.append(&main_search);
     main_box.append(&main_scrolled);
 
-    // Add main box to panes container
-    panes_container.append(&main_box);
+    // Initially add main box to root container
+    root_container.append(&main_box);
 
-    // Create container for splits
-    let splits_container = gtk::Box::builder()
-        .orientation(Orientation::Horizontal)
-        .spacing(0)
-        .homogeneous(true)
-        .build();
-
-    panes_container.append(&splits_container);
-
-    container.append(&panes_container);
+    container.append(&root_container);
 
     // Create channels for message passing
     let (tx, rx) = flume::unbounded::<String>();
     let main_filter_keyword = Rc::new(RefCell::new(String::new()));
 
+    // Create the main pane structure
+    let main_pane = SplitPane {
+        container: main_box.clone(),
+        list: main_list.clone(),
+        search_entry: main_search.clone(),
+        filter_keyword: main_filter_keyword.clone(),
+    };
+
     // Create the control before setting up the receiver
     let control = FirehoseControl {
-        splits_container: splits_container.clone(),
+        root_container: root_container.clone(),
+        main_pane,
         splits: Rc::new(RefCell::new(Vec::new())),
         message_sender: tx.clone(),
     };
@@ -622,11 +732,6 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
 }
 
 fn add_message_to_list(list: &ListBox, message: &str) {
-    // Parse message format: [timestamp] @author: text|||url
-    let parts: Vec<&str> = message.split("|||").collect();
-    let display_text = parts[0];
-    let post_url = if parts.len() > 1 { Some(parts[1].to_string()) } else { None };
-
     let row = gtk::Box::builder()
         .orientation(Orientation::Vertical)
         .spacing(4)
@@ -637,27 +742,13 @@ fn add_message_to_list(list: &ListBox, message: &str) {
         .build();
 
     let message_label = Label::builder()
-        .label(display_text)
+        .label(message)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .xalign(0.0)
         .build();
 
     row.append(&message_label);
-
-    // Make the row clickable if URL is present
-    if let Some(url) = post_url {
-        let gesture = gtk::GestureClick::new();
-        gesture.connect_released(move |_, _, _, _| {
-            if let Err(e) = open::that(&url) {
-                eprintln!("Failed to open URL: {}", e);
-            }
-        });
-        row.add_controller(gesture);
-
-        // Add hover styling
-        row.add_css_class("activatable");
-    }
 
     // Prepend to show newest messages at the top
     list.prepend(&row);
@@ -699,20 +790,15 @@ async fn start_jetstream(tx: flume::Sender<String>) -> anyhow::Result<()> {
     eprintln!("Connected to Bluesky Jetstream!");
 
     while let Ok(event) = receiver.recv_async().await {
-        if let JetstreamEvent::Commit(commit_event) = event {
+        if let JetstreamEvent::Commit(commit_event) = &event {
             match commit_event {
                 CommitEvent::Create { commit, .. } => {
-                    if let KnownRecord::AppBskyFeedPost(post) = commit.record {
+                    if let KnownRecord::AppBskyFeedPost(post) = &commit.record {
                         let timestamp = chrono::Utc::now().format("%H:%M:%S").to_string();
-                        let author = commit.info.did.as_str();
                         let rkey = &commit.info.rkey;
 
-                        // Create post URL: https://bsky.app/profile/{did}/post/{rkey}
-                        let post_url = format!("https://bsky.app/profile/{}/post/{}", author, rkey);
-
-                        // Format: [timestamp] @author: text|||url
-                        // Using ||| as delimiter to separate message from URL
-                        let message = format!("[{}] @{}: {}|||{}", timestamp, author, post.text, post_url);
+                        // Format: [timestamp] rkey: text
+                        let message = format!("[{}] {}: {}", timestamp, rkey, post.text);
 
                         // Send to UI thread
                         if tx.send(message).is_err() {
