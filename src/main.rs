@@ -35,6 +35,7 @@ struct GdeltArticle {
 
 #[derive(Debug, Deserialize)]
 struct GdeltResponse {
+    #[serde(default)]
     articles: Vec<GdeltArticle>,
 }
 
@@ -880,6 +881,21 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                 Ok(text) => {
                     eprintln!("Response text (first 500 chars): {}", &text.chars().take(500).collect::<String>());
 
+                    // Check if response is empty or null
+                    if text.trim().is_empty() || text.trim() == "null" {
+                        // Clear all children (including loading indicator)
+                        while let Some(child) = results_list.first_child() {
+                            results_list.remove(&child);
+                        }
+                        let no_results = Label::builder()
+                            .label("No articles found for this search")
+                            .margin_top(12)
+                            .margin_bottom(12)
+                            .build();
+                        results_list.append(&no_results);
+                        return;
+                    }
+
                     // Try to parse the JSON
                     match serde_json::from_str::<GdeltResponse>(&text) {
                         Ok(data) => {
@@ -952,18 +968,96 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                             }
                         }
                         Err(e) => {
-                            // Clear all children (including loading indicator)
-                            while let Some(child) = results_list.first_child() {
-                                results_list.remove(&child);
+                            // Try parsing as a direct array of articles
+                            match serde_json::from_str::<Vec<GdeltArticle>>(&text) {
+                                Ok(articles) => {
+                                    // Clear all children (including loading indicator)
+                                    while let Some(child) = results_list.first_child() {
+                                        results_list.remove(&child);
+                                    }
+
+                                    if articles.is_empty() {
+                                        let no_results = Label::builder()
+                                            .label("No articles found")
+                                            .margin_top(12)
+                                            .margin_bottom(12)
+                                            .build();
+                                        results_list.append(&no_results);
+                                    } else {
+                                        // Process the articles directly
+                                        let data = GdeltResponse { articles };
+
+                                        // Sort articles by seendate (most recent first)
+                                        let mut sorted_articles = data.articles.clone();
+                                        sorted_articles.sort_by(|a, b| b.seendate.cmp(&a.seendate));
+
+                                        // Deduplicate by domain - only show one article per source
+                                        let mut seen_domains = HashSet::new();
+                                        let mut unique_articles = Vec::new();
+
+                                        for article in sorted_articles.iter() {
+                                            if !seen_domains.contains(&article.domain) {
+                                                seen_domains.insert(article.domain.clone());
+                                                unique_articles.push(article);
+
+                                                // Stop once we have 25 unique sources
+                                                if unique_articles.len() >= 25 {
+                                                    break;
+                                                }
+                                            }
+                                        }
+
+                                        // Display deduplicated articles
+                                        for article in unique_articles.iter() {
+                                            let article_row = create_article_row(article);
+                                            results_list.append(&article_row);
+                                        }
+
+                                        // Group articles by country and place markers on the map
+                                        if let Some(ref layer) = marker_layer {
+                                            let mut articles_by_country: HashMap<String, Vec<GdeltArticle>> = HashMap::new();
+
+                                            // Group ALL articles by country (not just unique ones)
+                                            for article in data.articles.iter() {
+                                                if !article.sourcecountry.is_empty() {
+                                                    articles_by_country
+                                                        .entry(article.sourcecountry.clone())
+                                                        .or_insert_with(Vec::new)
+                                                        .push(article.clone());
+                                                }
+                                            }
+
+                                            eprintln!("Found {} countries with articles", articles_by_country.len());
+
+                                            // Create markers for each country
+                                            for (country_code, articles) in articles_by_country.iter() {
+                                                if let Some((lat, lon)) = get_country_coordinates(country_code) {
+                                                    eprintln!("Creating marker for {} with {} articles at ({}, {})",
+                                                             country_code, articles.len(), lat, lon);
+                                                    create_country_marker(layer, country_code, lat, lon, articles);
+                                                } else {
+                                                    eprintln!("No coordinates found for country code: {}", country_code);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    // Clear all children (including loading indicator)
+                                    while let Some(child) = results_list.first_child() {
+                                        results_list.remove(&child);
+                                    }
+                                    eprintln!("JSON parse error: {}", e);
+                                    eprintln!("Response preview: {}", &text.chars().take(200).collect::<String>());
+                                    let error_label = Label::builder()
+                                        .label("Error: Could not parse news feed. The API may be unavailable or returned unexpected data.")
+                                        .wrap(true)
+                                        .margin_top(12)
+                                        .margin_bottom(12)
+                                        .build();
+                                    results_list.append(&error_label);
+                                }
                             }
-                            eprintln!("JSON parse error: {}", e);
-                            let error_label = Label::builder()
-                                .label(&format!("Error parsing response: {}", e))
-                                .wrap(true)
-                                .margin_top(12)
-                                .margin_bottom(12)
-                                .build();
-                            results_list.append(&error_label);
                         }
                     }
                 }
