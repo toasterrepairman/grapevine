@@ -860,16 +860,21 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
     loading_row.append(&loading_label);
     results_list.append(&loading_row);
 
-    // GDELT requires non-empty queries, use a default search term
-    let search_query = if query.is_empty() { "news" } else { query };
-
-    // Build the API URL with English language filter - request more to allow deduplication
-    // Use timespan=1h to get only the most recent articles
-    let url = format!(
-        "{}?query={} sourcelang:english&mode=artlist&maxrecords=25&timespan=2h&format=json",
-        GDELT_API_URL,
-        urlencoding::encode(search_query)
-    );
+    // Build the API URL with English language filter
+    // Use timespan=2h to get only the most recent articles
+    let url = if query.is_empty() {
+        // For empty queries, just use language filter to get latest articles
+        format!(
+            "{}?query=sourcelang:english&mode=artlist&maxrecords=25&timespan=2h&format=json",
+            GDELT_API_URL
+        )
+    } else {
+        format!(
+            "{}?query={} sourcelang:english&mode=artlist&maxrecords=25&timespan=2h&format=json",
+            GDELT_API_URL,
+            urlencoding::encode(query)
+        )
+    };
 
     eprintln!("Fetching from URL: {}", url);
 
@@ -916,24 +921,8 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                                 let mut sorted_articles = data.articles.clone();
                                 sorted_articles.sort_by(|a, b| b.seendate.cmp(&a.seendate));
 
-                                // Deduplicate by domain - only show one article per source
-                                let mut seen_domains = HashSet::new();
-                                let mut unique_articles = Vec::new();
-
+                                // Display articles directly without deduplication
                                 for article in sorted_articles.iter() {
-                                    if !seen_domains.contains(&article.domain) {
-                                        seen_domains.insert(article.domain.clone());
-                                        unique_articles.push(article);
-
-                                        // Stop once we have 25 unique sources
-                                        if unique_articles.len() >= 25 {
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                // Display deduplicated articles
-                                for article in unique_articles.iter() {
                                     let article_row = create_article_row(article);
                                     results_list.append(&article_row);
                                 }
@@ -991,24 +980,8 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                                         let mut sorted_articles = data.articles.clone();
                                         sorted_articles.sort_by(|a, b| b.seendate.cmp(&a.seendate));
 
-                                        // Deduplicate by domain - only show one article per source
-                                        let mut seen_domains = HashSet::new();
-                                        let mut unique_articles = Vec::new();
-
+                                        // Display articles directly without deduplication
                                         for article in sorted_articles.iter() {
-                                            if !seen_domains.contains(&article.domain) {
-                                                seen_domains.insert(article.domain.clone());
-                                                unique_articles.push(article);
-
-                                                // Stop once we have 25 unique sources
-                                                if unique_articles.len() >= 25 {
-                                                    break;
-                                                }
-                                            }
-                                        }
-
-                                        // Display deduplicated articles
-                                        for article in unique_articles.iter() {
                                             let article_row = create_article_row(article);
                                             results_list.append(&article_row);
                                         }
