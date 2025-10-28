@@ -1,5 +1,5 @@
 use gtk::prelude::*;
-use gtk::{glib, Application, Label, Orientation, ScrolledWindow, Align, SearchEntry, ListBox, Popover};
+use gtk::{glib, Application, Label, Orientation, ScrolledWindow, Align, SearchEntry, ListBox, Popover, CheckButton};
 use libadwaita::{prelude::*, ViewSwitcher, HeaderBar, ToolbarView, ApplicationWindow, ViewStack, StyleManager, ColorScheme};
 use libshumate::prelude::{MarkerExt, LocationExt};
 use serde::Deserialize;
@@ -7,12 +7,17 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 use std::rc::Rc;
 use chrono::NaiveDateTime;
+use chrono_tz::Tz;
 use jetstream_oxide::{
     events::{JetstreamEvent, commit::CommitEvent},
     DefaultJetstreamEndpoints, JetstreamCompression, JetstreamConfig, JetstreamConnector,
 };
 use atrium_api::record::KnownRecord;
 use atrium_api::types::string::Nsid;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use futures_util::{StreamExt, SinkExt};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 const APP_ID: &str = "com.example.Grapevine";
 const GDELT_API_URL: &str = "https://api.gdeltproject.org/api/v2/doc/doc";
@@ -115,6 +120,18 @@ fn build_ui(app: &Application) {
     time_label.add_css_class("monospace");
     time_label.add_css_class("time-display");
 
+    // State to track 12/24 hour format (default to 12-hour)
+    let use_12_hour = Rc::new(RefCell::new(true));
+
+    // Make the time label clickable to toggle between 12/24 hour format
+    let time_label_gesture = gtk::GestureClick::new();
+    let use_12_hour_clone = use_12_hour.clone();
+    time_label_gesture.connect_released(move |_, _, _, _| {
+        let mut is_12_hour = use_12_hour_clone.borrow_mut();
+        *is_12_hour = !*is_12_hour;
+    });
+    time_label.add_controller(time_label_gesture);
+
     // Create refresh button (for Global Affairs)
     let refresh_button = gtk::Button::builder()
         .icon_name("view-refresh-symbolic")
@@ -171,11 +188,34 @@ fn build_ui(app: &Application) {
     header_bar.set_title_widget(Some(&time_label));
     header_bar.pack_end(&plus_button);
 
-    // Update time every second using local timezone
+    // Update time every second using local timezone with proper abbreviation
     let time_label_clone = time_label.clone();
+
+    // Get system timezone using iana-time-zone
+    let tz: Tz = iana_time_zone::get_timezone()
+        .ok()
+        .and_then(|tz_str| {
+            eprintln!("Detected timezone: {}", tz_str);
+            tz_str.parse().ok()
+        })
+        .unwrap_or_else(|| {
+            eprintln!("Failed to detect timezone, using UTC");
+            chrono_tz::UTC
+        });
+
+    let use_12_hour_for_timer = use_12_hour.clone();
     glib::timeout_add_seconds_local(1, move || {
-        let now = chrono::Local::now();
-        let time_str = now.format("%H:%M:%S %Z").to_string();
+        let now = chrono::Utc::now().with_timezone(&tz);
+
+        // Choose format based on current setting
+        let time_str = if *use_12_hour_for_timer.borrow() {
+            // 12-hour format with AM/PM
+            now.format("%I:%M:%S %p %Z").to_string()
+        } else {
+            // 24-hour format
+            now.format("%H:%M:%S %Z").to_string()
+        };
+
         time_label_clone.set_label(&time_str);
         glib::ControlFlow::Continue
     });
