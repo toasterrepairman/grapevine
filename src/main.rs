@@ -3,7 +3,7 @@ use gtk::{glib, Application, Label, Orientation, ScrolledWindow, Align, SearchEn
 use libadwaita::{prelude::*, ViewSwitcher, HeaderBar, ToolbarView, ApplicationWindow, ViewStack, StyleManager, ColorScheme};
 use libshumate::prelude::{MarkerExt, LocationExt};
 use serde::Deserialize;
-use std::collections::{HashSet, HashMap};
+use std::collections::HashMap;
 use std::cell::RefCell;
 use std::rc::Rc;
 use chrono::NaiveDateTime;
@@ -104,9 +104,16 @@ fn build_ui(app: &Application) {
     overlay.set_child(Some(&stack));
     overlay.add_overlay(&view_switcher);
 
-    // Create header bar
+    // Create header bar (now a statusline)
     let header_bar = HeaderBar::builder()
         .build();
+
+    // Create time/timezone display with monospace font (centered as title)
+    let time_label = Label::builder()
+        .label("Loading...")
+        .build();
+    time_label.add_css_class("monospace");
+    time_label.add_css_class("time-display");
 
     // Create refresh button (for Global Affairs)
     let refresh_button = gtk::Button::builder()
@@ -159,8 +166,19 @@ fn build_ui(app: &Application) {
         }
     });
 
+    // Pack widgets into headerbar
     header_bar.pack_start(&refresh_button);
-    header_bar.pack_start(&plus_button);
+    header_bar.set_title_widget(Some(&time_label));
+    header_bar.pack_end(&plus_button);
+
+    // Update time every second using local timezone
+    let time_label_clone = time_label.clone();
+    glib::timeout_add_seconds_local(1, move || {
+        let now = chrono::Local::now();
+        let time_str = now.format("%H:%M:%S %Z").to_string();
+        time_label_clone.set_label(&time_str);
+        glib::ControlFlow::Continue
+    });
 
     // Create toolbar view to contain everything
     let toolbar_view = ToolbarView::builder()
@@ -177,7 +195,7 @@ fn build_ui(app: &Application) {
         .default_height(600)
         .build();
 
-    // Load custom CSS for floating switcher and map markers
+    // Load custom CSS for floating switcher, map markers, and statusline
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_data(
         ".floating-switcher {
@@ -204,6 +222,13 @@ fn build_ui(app: &Application) {
             background-color: alpha(@card_bg_color, 0.95);
             border-radius: 12px;
             box-shadow: 0 4px 16px alpha(black, 0.6);
+        }
+        .time-display {
+            font-size: 13px;
+            font-weight: 600;
+            padding: 4px 12px;
+            background-color: alpha(@accent_bg_color, 0.15);
+            border-radius: 6px;
         }"
     );
 
