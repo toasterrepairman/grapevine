@@ -235,7 +235,7 @@ fn build_ui(app: &Application) {
         .default_height(600)
         .build();
 
-    // Load custom CSS for floating switcher, map markers, and statusline
+    // Load custom CSS for floating switcher, map markers, statusline, and firehose messages
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_data(
         ".floating-switcher {
@@ -269,6 +269,22 @@ fn build_ui(app: &Application) {
             padding: 4px 12px;
             background-color: alpha(@accent_bg_color, 0.15);
             border-radius: 6px;
+        }
+        .firehose-message {
+            background-color: alpha(@card_bg_color, 0.5);
+            border-radius: 8px;
+            padding: 8px 10px;
+            border: 1px solid alpha(@borders, 0.5);
+        }
+        .firehose-timestamp {
+            color: alpha(@window_fg_color, 0.55);
+        }
+        .firehose-rkey {
+            color: @accent_color;
+            font-weight: 600;
+        }
+        .firehose-text {
+            line-height: 1.4;
         }"
     );
 
@@ -472,6 +488,7 @@ struct FirehoseControl {
     main_pane: SplitPane,
     splits: Rc<RefCell<Vec<SplitPane>>>,
     message_sender: flume::Sender<String>,
+    scroll_paused_until: Rc<RefCell<std::time::Instant>>,
 }
 
 impl FirehoseControl {
@@ -512,13 +529,20 @@ impl FirehoseControl {
         let split_list = ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
             .build();
-        split_list.add_css_class("boxed-list");
 
         let split_scrolled = ScrolledWindow::builder()
             .vexpand(true)
             .hexpand(true)
             .build();
         split_scrolled.set_child(Some(&split_list));
+
+        // Set up scroll event handler for this split
+        let scroll_paused_clone = self.scroll_paused_until.clone();
+        let split_vadjustment = split_scrolled.vadjustment();
+        split_vadjustment.connect_value_changed(move |_| {
+            // Pause for 2 seconds after any scroll activity
+            *scroll_paused_clone.borrow_mut() = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        });
 
         split_box.append(&header_box);
         split_box.append(&split_scrolled);
@@ -715,7 +739,6 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
     let main_list = ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .build();
-    main_list.add_css_class("boxed-list");
 
     let main_scrolled = ScrolledWindow::builder()
         .vexpand(true)
@@ -735,6 +758,17 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
     let (tx, rx) = flume::unbounded::<String>();
     let main_filter_keyword = Rc::new(RefCell::new(String::new()));
 
+    // Create shared state for scroll pause tracking
+    let scroll_paused_until = Rc::new(RefCell::new(std::time::Instant::now()));
+
+    // Set up scroll event handler for main scrolled window
+    let scroll_paused_clone = scroll_paused_until.clone();
+    let main_vadjustment = main_scrolled.vadjustment();
+    main_vadjustment.connect_value_changed(move |_| {
+        // Pause for 2 seconds after any scroll activity
+        *scroll_paused_clone.borrow_mut() = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    });
+
     // Create the main pane structure
     let main_pane = SplitPane {
         container: main_box.clone(),
@@ -749,6 +783,7 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
         main_pane,
         splits: Rc::new(RefCell::new(Vec::new())),
         message_sender: tx.clone(),
+        scroll_paused_until: scroll_paused_until.clone(),
     };
 
     // Store references for the UI update
@@ -768,25 +803,32 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
     });
 
     // Set up a timer to process batched messages 5 times per second (every 200ms)
+    let scroll_paused_for_timer = scroll_paused_until.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
-        let mut buffer = message_buffer.borrow_mut();
+        // Check if we're currently paused due to scrolling
+        let is_paused = *scroll_paused_for_timer.borrow() > std::time::Instant::now();
 
-        if !buffer.is_empty() {
-            // Process all buffered messages
-            for message in buffer.iter() {
-                // Add to main list if it matches the main filter
-                let main_keyword = main_filter_keyword_clone.borrow().clone();
-                if main_keyword.is_empty() || message.to_lowercase().contains(&main_keyword.to_lowercase()) {
-                    add_message_to_list(&main_list_clone, message);
+        if !is_paused {
+            let mut buffer = message_buffer.borrow_mut();
+
+            if !buffer.is_empty() {
+                // Process all buffered messages
+                for message in buffer.iter() {
+                    // Add to main list if it matches the main filter
+                    let main_keyword = main_filter_keyword_clone.borrow().clone();
+                    if main_keyword.is_empty() || message.to_lowercase().contains(&main_keyword.to_lowercase()) {
+                        add_message_to_list(&main_list_clone, message);
+                    }
+
+                    // Broadcast to all splits
+                    control_clone.broadcast_message(message);
                 }
 
-                // Broadcast to all splits
-                control_clone.broadcast_message(message);
+                // Clear the buffer
+                buffer.clear();
             }
-
-            // Clear the buffer
-            buffer.clear();
         }
+        // If paused, messages remain in buffer and will be processed after pause ends
 
         glib::ControlFlow::Continue
     });
@@ -819,22 +861,73 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
 }
 
 fn add_message_to_list(list: &ListBox, message: &str) {
+    // Parse the message format: [timestamp] rkey: text
+    let parts: Vec<&str> = message.splitn(3, |c| c == '[' || c == ']').collect();
+    let (timestamp, rest) = if parts.len() >= 3 {
+        (parts[1].trim(), parts[2].trim())
+    } else {
+        ("", message)
+    };
+
+    let (rkey, text) = if let Some(colon_pos) = rest.find(':') {
+        let (k, t) = rest.split_at(colon_pos);
+        (k.trim(), t[1..].trim())
+    } else {
+        ("", rest)
+    };
+
+    // Create main container with card styling
     let row = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(4)
-        .margin_top(4)
-        .margin_bottom(4)
-        .margin_start(8)
-        .margin_end(8)
+        .spacing(6)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+    row.add_css_class("firehose-message");
+
+    // Create header box for metadata (timestamp and rkey)
+    let header = gtk::Box::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(8)
         .build();
 
+    // Timestamp label with monospace font
+    let timestamp_label = Label::builder()
+        .label(timestamp)
+        .xalign(0.0)
+        .build();
+    timestamp_label.add_css_class("caption");
+    timestamp_label.add_css_class("monospace");
+    timestamp_label.add_css_class("dim-label");
+    timestamp_label.add_css_class("firehose-timestamp");
+
+    // rkey label with accent color
+    let rkey_label = Label::builder()
+        .label(rkey)
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(20)
+        .build();
+    rkey_label.add_css_class("caption");
+    rkey_label.add_css_class("monospace");
+    rkey_label.add_css_class("firehose-rkey");
+
+    header.append(&timestamp_label);
+    header.append(&rkey_label);
+
+    // Message text with better typography
     let message_label = Label::builder()
-        .label(message)
+        .label(text)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .xalign(0.0)
+        .selectable(true)
         .build();
+    message_label.add_css_class("firehose-text");
 
+    row.append(&header);
     row.append(&message_label);
 
     // Prepend to show newest messages at the top
@@ -928,9 +1021,9 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
     // Build the API URL with English language filter
     // Use timespan=2h to get only the most recent articles
     let url = if query.is_empty() {
-        // For empty queries, just use language filter to get latest articles
+        // For empty queries, use "world" as default query to get broader news coverage
         format!(
-            "{}?query=sourcelang:english&mode=artlist&maxrecords=25&timespan=2h&format=json",
+            "{}?query=world sourcelang:english&mode=artlist&maxrecords=25&timespan=2h&format=json",
             GDELT_API_URL
         )
     } else {
@@ -986,10 +1079,17 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                                 let mut sorted_articles = data.articles.clone();
                                 sorted_articles.sort_by(|a, b| b.seendate.cmp(&a.seendate));
 
-                                // Display articles directly without deduplication
+                                // Deduplicate by domain - limit to 3 articles per domain
+                                let mut domain_counts: HashMap<String, usize> = HashMap::new();
+                                let max_per_domain = 3;
+
                                 for article in sorted_articles.iter() {
-                                    let article_row = create_article_row(article);
-                                    results_list.append(&article_row);
+                                    let count = domain_counts.entry(article.domain.clone()).or_insert(0);
+                                    if *count < max_per_domain {
+                                        let article_row = create_article_row(article);
+                                        results_list.append(&article_row);
+                                        *count += 1;
+                                    }
                                 }
 
                                 // Group articles by country and place markers on the map
@@ -1045,10 +1145,17 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                                         let mut sorted_articles = data.articles.clone();
                                         sorted_articles.sort_by(|a, b| b.seendate.cmp(&a.seendate));
 
-                                        // Display articles directly without deduplication
+                                        // Deduplicate by domain - limit to 3 articles per domain
+                                        let mut domain_counts: HashMap<String, usize> = HashMap::new();
+                                        let max_per_domain = 3;
+
                                         for article in sorted_articles.iter() {
-                                            let article_row = create_article_row(article);
-                                            results_list.append(&article_row);
+                                            let count = domain_counts.entry(article.domain.clone()).or_insert(0);
+                                            if *count < max_per_domain {
+                                                let article_row = create_article_row(article);
+                                                results_list.append(&article_row);
+                                                *count += 1;
+                                            }
                                         }
 
                                         // Group articles by country and place markers on the map
