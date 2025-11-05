@@ -62,7 +62,7 @@
 
         postBuild = ''
             # for desktop files
-            install -Dt $out/share/applications resources/grapevine.desktop
+            install -Dt $out/share/applications resources/com.toasterrepair.grapevine.desktop
 
             install -Dt $out/share/icons resources/icon-grapevine.png
         '';
