@@ -19,7 +19,7 @@ use futures_util::{StreamExt, SinkExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const APP_ID: &str = "com.example.Grapevine";
+const APP_ID: &str = "com.toasterrepair.grapevine";
 const GDELT_API_URL: &str = "https://api.gdeltproject.org/api/v2/doc/doc";
 
 #[derive(Debug, Deserialize, Clone)]
