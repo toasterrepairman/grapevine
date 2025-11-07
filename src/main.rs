@@ -235,7 +235,7 @@ fn build_ui(app: &Application) {
         .default_height(600)
         .build();
 
-    // Load custom CSS for floating switcher, map markers, statusline, and firehose messages
+    // Load custom CSS for floating switcher, map markers, statusline, firehose messages, and news articles
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_data(
         ".floating-switcher {
@@ -273,7 +273,7 @@ fn build_ui(app: &Application) {
         .firehose-message {
             background-color: alpha(@card_bg_color, 0.5);
             border-radius: 8px;
-            padding: 8px 10px;
+            padding: 3px 4px;
             border: 1px solid alpha(@borders, 0.5);
         }
         .firehose-timestamp {
@@ -285,6 +285,63 @@ fn build_ui(app: &Application) {
         }
         .firehose-text {
             line-height: 1.4;
+        }
+        .news-article-card {
+            background-color: @card_bg_color;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid alpha(@borders, 0.2);
+            transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .news-article-card:hover {
+            border-color: alpha(@accent_bg_color, 0.3);
+            box-shadow: 0 4px 12px alpha(black, 0.12);
+            transform: translateY(-2px);
+        }
+        .article-thumbnail {
+            background-color: alpha(@window_bg_color, 0.3);
+            height: 140px;
+            border-radius: 8px;
+            margin: 8px;
+        }
+        .article-title {
+            font-size: 14px;
+            font-weight: 600;
+            line-height: 1.35;
+            color: @window_fg_color;
+        }
+        .article-domain {
+            font-size: 11px;
+            font-weight: 500;
+            color: alpha(@window_fg_color, 0.5);
+            margin-top: 2px;
+        }
+        .badge {
+            background-color: alpha(@accent_bg_color, 0.15);
+            border-radius: 6px;
+            padding: 3px 8px;
+            font-size: 10px;
+            font-weight: 600;
+            min-height: 0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .badge-country {
+            background-color: alpha(@accent_bg_color, 0.25);
+            color: @accent_fg_color;
+            transition: all 150ms ease;
+        }
+        .badge-country:hover {
+            background-color: @accent_bg_color;
+            box-shadow: 0 2px 6px alpha(@accent_bg_color, 0.4);
+        }
+        .badge-time {
+            background-color: alpha(@window_fg_color, 0.08);
+            color: alpha(@window_fg_color, 0.7);
+        }
+        .badge-lang {
+            background-color: alpha(@warning_bg_color, 0.2);
+            color: @warning_fg_color;
         }"
     );
 
@@ -879,18 +936,18 @@ fn add_message_to_list(list: &ListBox, message: &str) {
     // Create main container with card styling
     let row = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(6)
-        .margin_top(6)
-        .margin_bottom(6)
-        .margin_start(6)
-        .margin_end(6)
+        .spacing(3)
+        .margin_top(2)
+        .margin_bottom(2)
+        .margin_start(4)
+        .margin_end(4)
         .build();
     row.add_css_class("firehose-message");
 
     // Create header box for metadata (timestamp and rkey)
     let header = gtk::Box::builder()
         .orientation(Orientation::Horizontal)
-        .spacing(8)
+        .spacing(6)
         .build();
 
     // Timestamp label with monospace font
@@ -1000,9 +1057,13 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
         results_list.remove(&child);
     }
 
+    // Create a shared map to store marker buttons by country code
+    let marker_buttons_map: Rc<RefCell<HashMap<String, gtk::Button>>> = Rc::new(RefCell::new(HashMap::new()));
+
     // Clear existing markers if marker layer is provided
     if let Some(ref layer) = marker_layer {
         layer.remove_all();
+        marker_buttons_map.borrow_mut().clear();
     }
 
     // Show loading indicator
@@ -1086,7 +1147,12 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                                 for article in sorted_articles.iter() {
                                     let count = domain_counts.entry(article.domain.clone()).or_insert(0);
                                     if *count < max_per_domain {
-                                        let article_row = create_article_row(article);
+                                        let marker_data = if marker_layer.is_some() {
+                                            Some((marker_buttons_map.clone(), marker_layer.clone().unwrap()))
+                                        } else {
+                                            None
+                                        };
+                                        let article_row = create_article_row_with_markers(article, marker_data);
                                         results_list.append(&article_row);
                                         *count += 1;
                                     }
@@ -1113,7 +1179,7 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                                         if let Some((lat, lon)) = get_country_coordinates(country_code) {
                                             eprintln!("Creating marker for {} with {} articles at ({}, {})",
                                                      country_code, articles.len(), lat, lon);
-                                            create_country_marker(layer, country_code, lat, lon, articles);
+                                            create_country_marker(layer, country_code, lat, lon, articles, marker_buttons_map.clone());
                                         } else {
                                             eprintln!("No coordinates found for country code: {}", country_code);
                                         }
@@ -1152,7 +1218,12 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                                         for article in sorted_articles.iter() {
                                             let count = domain_counts.entry(article.domain.clone()).or_insert(0);
                                             if *count < max_per_domain {
-                                                let article_row = create_article_row(article);
+                                                let marker_data = if marker_layer.is_some() {
+                                                    Some((marker_buttons_map.clone(), marker_layer.clone().unwrap()))
+                                                } else {
+                                                    None
+                                                };
+                                                let article_row = create_article_row_with_markers(article, marker_data);
                                                 results_list.append(&article_row);
                                                 *count += 1;
                                             }
@@ -1179,7 +1250,7 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                                                 if let Some((lat, lon)) = get_country_coordinates(country_code) {
                                                     eprintln!("Creating marker for {} with {} articles at ({}, {})",
                                                              country_code, articles.len(), lat, lon);
-                                                    create_country_marker(layer, country_code, lat, lon, articles);
+                                                    create_country_marker(layer, country_code, lat, lon, articles, marker_buttons_map.clone());
                                                 } else {
                                                     eprintln!("No coordinates found for country code: {}", country_code);
                                                 }
@@ -1238,50 +1309,151 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
 }
 
 fn create_article_row(article: &GdeltArticle) -> gtk::Box {
-    let row = gtk::Box::builder()
+    create_article_row_with_markers(article, None)
+}
+
+/// Create a compact, modern article widget with vertical layout
+/// Optimized for narrow screens with uniform design
+fn create_article_row_with_markers(
+    article: &GdeltArticle,
+    country_marker_data: Option<(Rc<RefCell<HashMap<String, gtk::Button>>>, libshumate::MarkerLayer)>
+) -> gtk::Box {
+    // Main card container - vertical layout
+    let card = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(4)
+        .spacing(0)
+        .margin_top(4)
+        .margin_bottom(4)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+    card.add_css_class("news-article-card");
+
+    // Image header (if available)
+    if !article.socialimage.is_empty() {
+        let picture = gtk::Picture::builder()
+            .height_request(140)
+            .width_request(0)
+            .hexpand(true)
+            .can_shrink(true)
+            .content_fit(gtk::ContentFit::Cover)
+            .visible(false)
+            .build();
+        picture.add_css_class("article-thumbnail");
+
+        card.append(&picture);
+
+        // Load image from URL asynchronously
+        let url = article.socialimage.clone();
+        let picture_clone = picture.clone();
+        glib::spawn_future_local(async move {
+            match reqwest::get(&url).await {
+                Ok(response) => {
+                    if let Ok(bytes) = response.bytes().await {
+                        let bytes_vec = bytes.to_vec();
+                        let bytes = glib::Bytes::from(&bytes_vec);
+                        if let Ok(texture) = gtk::gdk::Texture::from_bytes(&bytes) {
+                            picture_clone.set_paintable(Some(&texture));
+                            picture_clone.set_visible(true);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to load image: {}", e);
+                }
+            }
+        });
+    }
+
+    // Content container with padding
+    let content_box = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(6)
         .margin_top(8)
         .margin_bottom(8)
-        .margin_start(4)
-        .margin_end(4)
+        .margin_start(10)
+        .margin_end(10)
         .build();
 
-    // Article title
+    // Title
     let title_label = Label::builder()
         .label(&article.title)
         .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .wrap_mode(gtk::pango::WrapMode::Word)
         .xalign(0.0)
+        .lines(2)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
-    title_label.add_css_class("heading");
+    title_label.add_css_class("article-title");
+    content_box.append(&title_label);
 
-    // Metadata (domain, date, country)
-    let mut metadata_parts = Vec::new();
-    if !article.domain.is_empty() {
-        metadata_parts.push(article.domain.clone());
-    }
-    if !article.seendate.is_empty() {
-        // Parse GDELT timestamp format: 20251024T074500Z
-        let formatted_date = parse_gdelt_timestamp(&article.seendate);
-        metadata_parts.push(formatted_date);
-    }
+    // Metadata badges row
+    let badges_box = gtk::Box::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(4)
+        .build();
+
+    // Country badge (clickable)
     if !article.sourcecountry.is_empty() {
-        metadata_parts.push(article.sourcecountry.clone());
+        let country_button = gtk::Button::builder()
+            .label(&article.sourcecountry)
+            .build();
+        country_button.add_css_class("badge");
+        country_button.add_css_class("badge-country");
+
+        // If we have marker data, make the button click the corresponding map marker
+        if let Some((marker_buttons_map, _)) = country_marker_data.clone() {
+            let country_code = article.sourcecountry.clone();
+            country_button.connect_clicked(move |_| {
+                if let Some(marker_button) = marker_buttons_map.borrow().get(&country_code) {
+                    marker_button.emit_by_name::<()>("clicked", &[]);
+                    eprintln!("Triggered map marker for {}", country_code);
+                } else {
+                    eprintln!("No marker found for country: {}", country_code);
+                }
+            });
+        }
+
+        badges_box.append(&country_button);
     }
 
-    let metadata_label = Label::builder()
-        .label(&metadata_parts.join(" • "))
-        .wrap(true)
-        .xalign(0.0)
-        .build();
-    metadata_label.add_css_class("dim-label");
-    metadata_label.add_css_class("caption");
+    // Time badge
+    if !article.seendate.is_empty() {
+        let formatted_date = parse_gdelt_timestamp(&article.seendate);
+        let time_badge = gtk::Label::builder()
+            .label(&formatted_date)
+            .build();
+        time_badge.add_css_class("badge");
+        time_badge.add_css_class("badge-time");
+        badges_box.append(&time_badge);
+    }
 
-    row.append(&title_label);
-    row.append(&metadata_label);
+    // Language badge
+    if !article.language.is_empty() && article.language.to_uppercase() != "ENGLISH" {
+        let lang_badge = gtk::Label::builder()
+            .label(&article.language.to_uppercase())
+            .build();
+        lang_badge.add_css_class("badge");
+        lang_badge.add_css_class("badge-lang");
+        badges_box.append(&lang_badge);
+    }
 
-    // Make the row clickable
+    content_box.append(&badges_box);
+
+    // Domain footer
+    if !article.domain.is_empty() {
+        let domain_label = Label::builder()
+            .label(&article.domain)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        domain_label.add_css_class("article-domain");
+        content_box.append(&domain_label);
+    }
+
+    card.append(&content_box);
+
+    // Make the entire card clickable to open article
     let gesture = gtk::GestureClick::new();
     let url = article.url.clone();
     gesture.connect_released(move |_, _, _, _| {
@@ -1289,12 +1461,12 @@ fn create_article_row(article: &GdeltArticle) -> gtk::Box {
             eprintln!("Failed to open URL: {}", e);
         }
     });
-    row.add_controller(gesture);
+    card.add_controller(gesture);
 
     // Add hover styling
-    row.add_css_class("activatable");
+    card.add_css_class("activatable");
 
-    row
+    card
 }
 
 fn parse_gdelt_timestamp(timestamp: &str) -> String {
@@ -1330,7 +1502,8 @@ fn create_country_marker(
     country_code: &str,
     lat: f64,
     lon: f64,
-    articles: &[GdeltArticle]
+    articles: &[GdeltArticle],
+    marker_buttons_map: Rc<RefCell<HashMap<String, gtk::Button>>>
 ) {
     eprintln!("  Creating marker button for {}", country_code);
 
@@ -1351,6 +1524,9 @@ fn create_country_marker(
         .label(&format!("{} {}", display_name, articles.len()))
         .build();
     marker_button.add_css_class("map-marker");
+
+    // Store the button in the map for later access from article widgets
+    marker_buttons_map.borrow_mut().insert(country_code.to_string(), marker_button.clone());
 
     // Create a popover to show articles
     let popover = Popover::builder()
