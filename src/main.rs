@@ -205,6 +205,17 @@ fn build_ui(app: &Application) {
         .default_height(600)
         .build();
 
+    // Add Ctrl+Q keyboard shortcut to close the window
+    let quit_action = gtk::gio::SimpleAction::new("quit", None);
+    let window_weak = window.downgrade();
+    quit_action.connect_activate(move |_, _| {
+        if let Some(window) = window_weak.upgrade() {
+            window.close();
+        }
+    });
+    app.add_action(&quit_action);
+    app.set_accels_for_action("app.quit", &["<Primary>q"]);
+
     // Load custom CSS for floating switcher, map markers, statusline, firehose messages, and news articles
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_data(
