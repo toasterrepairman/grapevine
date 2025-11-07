@@ -1439,12 +1439,12 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
     let url = if query.is_empty() {
         // For empty queries, use "world" as default query to get broader news coverage
         format!(
-            "{}?query=world sourcelang:english&mode=artlist&maxrecords=25&timespan=2h&format=json",
+            "{}?query=world sourcelang:english&mode=artlist&maxrecords=50&timespan=2h&format=json",
             GDELT_API_URL
         )
     } else {
         format!(
-            "{}?query={} sourcelang:english&mode=artlist&maxrecords=25&timespan=2h&format=json",
+            "{}?query={} sourcelang:english&mode=artlist&maxrecords=50&timespan=2h&format=json",
             GDELT_API_URL,
             urlencoding::encode(query)
         )
