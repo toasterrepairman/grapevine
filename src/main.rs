@@ -321,6 +321,10 @@ fn build_ui(app: &Application) {
             background-color: alpha(@error_bg_color, 0.2);
             color: @error_fg_color;
         }
+        .badge-neutral {
+            background-color: alpha(@window_fg_color, 0.08);
+            color: alpha(@window_fg_color, 0.7);
+        }
         .popover-currency-section {
             padding: 8px;
             background-color: alpha(@accent_bg_color, 0.08);
@@ -331,6 +335,12 @@ fn build_ui(app: &Application) {
             font-family: monospace;
             color: @accent_color;
             font-weight: 700;
+        }
+        .currency-change-positive {
+            color: @success_color;
+        }
+        .currency-change-negative {
+            color: @error_color;
         }
         .popover-article-row {
             background-color: alpha(@card_bg_color, 0.3);

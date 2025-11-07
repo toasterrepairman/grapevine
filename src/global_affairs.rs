@@ -657,7 +657,7 @@ fn create_country_marker(
         let currency_code = currency_code.to_string();
         glib::spawn_future_local(async move {
             if let Some(currency_info) = fetch_currency_info(&currency_code).await {
-                // Currency header
+                // Currency header with rate and last updated timestamp
                 let currency_header = gtk::Box::builder()
                     .orientation(Orientation::Horizontal)
                     .spacing(8)
@@ -670,54 +670,71 @@ fn create_country_marker(
                     .build();
                 currency_label.add_css_class("title-4");
 
-                let rate_label = Label::builder()
-                    .label(&format!("{:.4}", currency_info.rate_to_usd))
+                currency_header.append(&currency_label);
+
+                // Add last updated timestamp (right-justified)
+                let updated_label = Label::builder()
+                    .label(&format!("Updated: {}", chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")))
                     .xalign(1.0)
                     .build();
-                rate_label.add_css_class("title-4");
-                rate_label.add_css_class("currency-rate");
+                updated_label.add_css_class("dim-label");
+                updated_label.add_css_class("caption");
+                currency_header.append(&updated_label);
 
-                currency_header.append(&currency_label);
-                currency_header.append(&rate_label);
                 currency_box_clone.append(&currency_header);
 
-                // Changes row
-                let changes_box = gtk::Box::builder()
+                // Rate display with 24hr change indicator
+                let rate_box = gtk::Box::builder()
                     .orientation(Orientation::Horizontal)
-                    .spacing(6)
+                    .spacing(8)
                     .build();
 
+                let rate_label = Label::builder()
+                    .label(&format!("{:.4}", currency_info.rate_to_usd))
+                    .xalign(0.0)
+                    .build();
+                rate_label.add_css_class("title-3");
+                rate_label.add_css_class("currency-rate");
+
+                rate_box.append(&rate_label);
+
+                // Add colored 24hr change next to rate
                 if let Some(change_24h) = currency_info.change_24h {
-                    let change_24h_badge = Label::builder()
-                        .label(&format!("24h: {}{:.2}%",
-                            if change_24h >= 0.0 { "+" } else { "" },
+                    let change_label = Label::builder()
+                        .label(&format!("({}{:.2}%)",
+                            if change_24h > 0.0 { "+" } else { "" },
                             change_24h))
                         .build();
-                    change_24h_badge.add_css_class("badge");
-                    if change_24h >= 0.0 {
-                        change_24h_badge.add_css_class("badge-positive");
-                    } else {
-                        change_24h_badge.add_css_class("badge-negative");
+                    change_label.add_css_class("title-4");
+                    if change_24h > 0.0 {
+                        change_label.add_css_class("currency-change-positive");
+                    } else if change_24h < 0.0 {
+                        change_label.add_css_class("currency-change-negative");
                     }
-                    changes_box.append(&change_24h_badge);
+                    // If change_24h == 0.0, don't add any color class (default color)
+                    rate_box.append(&change_label);
                 }
 
+                currency_box_clone.append(&rate_box);
+
+                // 14-day change badge
                 if let Some(change_7d) = currency_info.change_7d {
                     let change_7d_badge = Label::builder()
-                        .label(&format!("7d: {}{:.2}%",
-                            if change_7d >= 0.0 { "+" } else { "" },
+                        .label(&format!("14d: {}{:.2}%",
+                            if change_7d > 0.0 { "+" } else { "" },
                             change_7d))
                         .build();
                     change_7d_badge.add_css_class("badge");
-                    if change_7d >= 0.0 {
+                    if change_7d > 0.0 {
                         change_7d_badge.add_css_class("badge-positive");
-                    } else {
+                    } else if change_7d < 0.0 {
                         change_7d_badge.add_css_class("badge-negative");
+                    } else {
+                        // Neutral - no change
+                        change_7d_badge.add_css_class("badge-neutral");
                     }
-                    changes_box.append(&change_7d_badge);
+                    currency_box_clone.append(&change_7d_badge);
                 }
-
-                currency_box_clone.append(&changes_box);
 
                 // Simple sparkline visualization
                 if !currency_info.trend_data.is_empty() {
@@ -800,14 +817,36 @@ fn create_country_marker(
     eprintln!("  Marker added successfully for {}", country_code);
 }
 
-/// Create a simple sparkline visualization for currency trend
-fn create_sparkline(data: &[f64]) -> gtk::DrawingArea {
-    let drawing_area = gtk::DrawingArea::builder()
-        .content_width(280)
-        .content_height(40)
+/// Create a simple sparkline visualization for currency trend with axis labels
+fn create_sparkline(data: &[f64]) -> gtk::Box {
+    let container = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(4)
         .build();
 
+    let drawing_area = gtk::DrawingArea::builder()
+        .content_width(280)
+        .content_height(60)
+        .build();
+
+    // Enable tooltip support
+    drawing_area.set_has_tooltip(true);
+
     let data = data.to_vec();
+    let data_for_tooltip = data.clone();
+
+    // Calculate min/max for labels
+    let min = if !data.is_empty() {
+        data.iter().cloned().fold(f64::INFINITY, f64::min)
+    } else {
+        0.0
+    };
+    let max = if !data.is_empty() {
+        data.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    } else {
+        0.0
+    };
+
     drawing_area.set_draw_func(move |_, cr, width, height| {
         if data.is_empty() {
             return;
@@ -816,30 +855,66 @@ fn create_sparkline(data: &[f64]) -> gtk::DrawingArea {
         let width = width as f64;
         let height = height as f64;
 
+        // Add margins for better visualization
+        let margin_left = 8.0;
+        let margin_right = 8.0;
+        let margin_top = 15.0;
+        let margin_bottom = 20.0;
+
+        let plot_width = width - margin_left - margin_right;
+        let plot_height = height - margin_top - margin_bottom;
+
         // Find min and max for scaling
         let min = data.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let range = max - min;
 
+        // Draw subtle grid lines
+        cr.set_source_rgba(0.5, 0.5, 0.5, 0.15);
+        cr.set_line_width(0.5);
+
+        // Horizontal grid lines (3 lines: top, middle, bottom)
+        for i in 0..=2 {
+            let y = margin_top + (plot_height * i as f64 / 2.0);
+            cr.move_to(margin_left, y);
+            cr.line_to(margin_left + plot_width, y);
+        }
+        let _ = cr.stroke();
+
         if range == 0.0 {
             // Draw a flat line if no variation
             cr.set_source_rgb(0.5, 0.5, 0.5);
             cr.set_line_width(2.0);
-            cr.move_to(0.0, height / 2.0);
-            cr.line_to(width, height / 2.0);
+            cr.move_to(margin_left, margin_top + plot_height / 2.0);
+            cr.line_to(margin_left + plot_width, margin_top + plot_height / 2.0);
             let _ = cr.stroke();
             return;
         }
 
-        // Draw the sparkline
-        cr.set_source_rgb(0.5, 0.7, 1.0); // Light blue color
+        // Draw the area under the curve with neutral color
+        let point_spacing = plot_width / (data.len() - 1).max(1) as f64;
+
+        // Use neutral blue color for area fill
+        cr.set_source_rgba(0.4, 0.6, 0.9, 0.12); // Neutral blue tint
+
+        // Draw filled area
+        cr.move_to(margin_left, margin_top + plot_height);
+        for (i, &value) in data.iter().enumerate() {
+            let x = margin_left + (i as f64 * point_spacing);
+            let y = margin_top + plot_height - ((value - min) / range) * plot_height;
+            cr.line_to(x, y);
+        }
+        cr.line_to(margin_left + plot_width, margin_top + plot_height);
+        cr.close_path();
+        let _ = cr.fill();
+
+        // Draw the sparkline in neutral blue
+        cr.set_source_rgb(0.4, 0.6, 0.9); // Neutral blue
         cr.set_line_width(2.0);
 
-        let point_spacing = width / (data.len() - 1).max(1) as f64;
-
         for (i, &value) in data.iter().enumerate() {
-            let x = i as f64 * point_spacing;
-            let y = height - ((value - min) / range) * height;
+            let x = margin_left + (i as f64 * point_spacing);
+            let y = margin_top + plot_height - ((value - min) / range) * plot_height;
 
             if i == 0 {
                 cr.move_to(x, y);
@@ -851,16 +926,114 @@ fn create_sparkline(data: &[f64]) -> gtk::DrawingArea {
         let _ = cr.stroke();
 
         // Draw points
-        cr.set_source_rgb(0.3, 0.5, 0.9);
         for (i, &value) in data.iter().enumerate() {
-            let x = i as f64 * point_spacing;
-            let y = height - ((value - min) / range) * height;
-            cr.arc(x, y, 3.0, 0.0, 2.0 * std::f64::consts::PI);
+            let x = margin_left + (i as f64 * point_spacing);
+            let y = margin_top + plot_height - ((value - min) / range) * plot_height;
+            cr.arc(x, y, 2.5, 0.0, 2.0 * std::f64::consts::PI);
             let _ = cr.fill();
         }
+
+        // Draw axis labels (Y-axis values)
+        cr.set_source_rgba(0.7, 0.7, 0.7, 0.8);
+        cr.set_font_size(9.0);
+
+        // Max value label (top)
+        let max_text = format!("{:.4}", max);
+        cr.move_to(margin_left, margin_top - 2.0);
+        let _ = cr.show_text(&max_text);
+
+        // Min value label (bottom)
+        let min_text = format!("{:.4}", min);
+        cr.move_to(margin_left, margin_top + plot_height + 12.0);
+        let _ = cr.show_text(&min_text);
     });
 
-    drawing_area
+    // Add tooltip handler for hover
+    drawing_area.connect_query_tooltip(move |widget, x, y, _keyboard_mode, tooltip| {
+        if data_for_tooltip.is_empty() {
+            return false;
+        }
+
+        let width = widget.width() as f64;
+        let height = widget.height() as f64;
+
+        // Margins must match those in draw_func
+        let margin_left = 8.0;
+        let margin_right = 8.0;
+        let margin_top = 15.0;
+        let margin_bottom = 20.0;
+
+        let plot_width = width - margin_left - margin_right;
+        let plot_height = height - margin_top - margin_bottom;
+
+        let point_spacing = plot_width / (data_for_tooltip.len() - 1).max(1) as f64;
+
+        // Find the closest data point to the mouse cursor
+        let mouse_x = x as f64;
+        let mouse_y = y as f64;
+
+        // Check if mouse is within the plot area
+        if mouse_x < margin_left || mouse_x > margin_left + plot_width ||
+           mouse_y < margin_top || mouse_y > margin_top + plot_height {
+            return false;
+        }
+
+        // Find closest point
+        let mut closest_idx = 0;
+        let mut closest_dist = f64::INFINITY;
+
+        let min = data_for_tooltip.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = data_for_tooltip.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let range = max - min;
+
+        if range == 0.0 {
+            return false;
+        }
+
+        for (i, &value) in data_for_tooltip.iter().enumerate() {
+            let point_x = margin_left + (i as f64 * point_spacing);
+            let point_y = margin_top + plot_height - ((value - min) / range) * plot_height;
+
+            let dist = ((point_x - mouse_x).powi(2) + (point_y - mouse_y).powi(2)).sqrt();
+
+            if dist < closest_dist {
+                closest_dist = dist;
+                closest_idx = i;
+            }
+        }
+
+        // Only show tooltip if mouse is reasonably close to a point (within 20 pixels)
+        if closest_dist > 20.0 {
+            return false;
+        }
+
+        let value = data_for_tooltip[closest_idx];
+        let days_ago = data_for_tooltip.len() - 1 - closest_idx;
+
+        let tooltip_text = if days_ago == 0 {
+            format!("Today: {:.4}", value)
+        } else if days_ago == 1 {
+            format!("Yesterday: {:.4}", value)
+        } else {
+            format!("{} days ago: {:.4}", days_ago, value)
+        };
+
+        tooltip.set_text(Some(&tooltip_text));
+        true
+    });
+
+    container.append(&drawing_area);
+
+    // Add X-axis label
+    let x_axis_label = Label::builder()
+        .label("14-day trend")
+        .xalign(0.5)
+        .build();
+    x_axis_label.add_css_class("dim-label");
+    x_axis_label.add_css_class("caption");
+    container.append(&x_axis_label);
+
+    container
 }
 
 /// Create a compact article row for the popover
@@ -953,9 +1126,9 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
         });
     }
 
-    // Get today's date and 7 days ago
+    // Get today's date and 14 days ago (for better trend visualization)
     let today = chrono::Utc::now().date_naive();
-    let seven_days_ago = today - chrono::Duration::days(7);
+    let fourteen_days_ago = today - chrono::Duration::days(14);
 
     // Fetch latest rate (currency to USD)
     let latest_url = format!(
@@ -981,10 +1154,10 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
 
     let latest_rate = latest_rate?;
 
-    // Fetch 7-day historical data for trend
+    // Fetch 14-day historical data for trend
     let historical_url = format!(
         "https://api.frankfurter.app/{}..{}?from={}&to=USD",
-        seven_days_ago.format("%Y-%m-%d"),
+        fourteen_days_ago.format("%Y-%m-%d"),
         today.format("%Y-%m-%d"),
         currency_code
     );
