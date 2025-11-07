@@ -44,6 +44,36 @@ struct GdeltResponse {
     articles: Vec<GdeltArticle>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+struct FrankfurterRates {
+    #[serde(flatten)]
+    rates: HashMap<String, f64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct FrankfurterLatestResponse {
+    base: String,
+    date: String,
+    rates: FrankfurterRates,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct FrankfurterHistoricalResponse {
+    base: String,
+    start_date: String,
+    end_date: String,
+    rates: HashMap<String, FrankfurterRates>,
+}
+
+#[derive(Debug, Clone)]
+struct CurrencyInfo {
+    code: String,
+    rate_to_usd: f64,
+    change_24h: Option<f64>,
+    change_7d: Option<f64>,
+    trend_data: Vec<f64>,
+}
+
 fn main() -> glib::ExitCode {
     // Initialize Tokio runtime for async operations
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -342,6 +372,50 @@ fn build_ui(app: &Application) {
         .badge-lang {
             background-color: alpha(@warning_bg_color, 0.2);
             color: @warning_fg_color;
+        }
+        .badge-positive {
+            background-color: alpha(@success_bg_color, 0.2);
+            color: @success_fg_color;
+        }
+        .badge-negative {
+            background-color: alpha(@error_bg_color, 0.2);
+            color: @error_fg_color;
+        }
+        .popover-currency-section {
+            padding: 8px;
+            background-color: alpha(@accent_bg_color, 0.08);
+            border-radius: 8px;
+            border: 1px solid alpha(@accent_bg_color, 0.15);
+        }
+        .currency-rate {
+            font-family: monospace;
+            color: @accent_color;
+            font-weight: 700;
+        }
+        .popover-article-row {
+            background-color: alpha(@card_bg_color, 0.3);
+            border-radius: 6px;
+            border: 1px solid alpha(@borders, 0.15);
+            transition: all 150ms ease;
+        }
+        .popover-article-row:hover {
+            background-color: alpha(@card_bg_color, 0.6);
+            border-color: alpha(@accent_bg_color, 0.3);
+            box-shadow: 0 2px 6px alpha(black, 0.08);
+        }
+        .popover-article-title {
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.3;
+        }
+        .popover-article-meta {
+            font-size: 11px;
+            color: alpha(@window_fg_color, 0.55);
+        }
+        .popover-article-time {
+            font-size: 10px;
+            color: alpha(@window_fg_color, 0.45);
+            font-weight: 500;
         }"
     );
 
@@ -1536,40 +1610,162 @@ fn create_country_marker(
     // Create content for the popover
     let popover_box = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(6)
-        .margin_top(8)
-        .margin_bottom(8)
-        .margin_start(8)
-        .margin_end(8)
+        .spacing(8)
+        .margin_top(10)
+        .margin_bottom(10)
+        .margin_start(10)
+        .margin_end(10)
         .build();
 
-    // Add country header
-    let country_label = Label::builder()
-        .label(&format!("Articles from {}", country_code))
+    // Header with country name
+    let header_box = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(4)
         .build();
-    country_label.add_css_class("title-4");
-    popover_box.append(&country_label);
+
+    let country_label = Label::builder()
+        .label(country_code)
+        .xalign(0.0)
+        .build();
+    country_label.add_css_class("title-3");
+    header_box.append(&country_label);
+
+    let articles_count_label = Label::builder()
+        .label(&format!("{} articles", articles.len()))
+        .xalign(0.0)
+        .build();
+    articles_count_label.add_css_class("dim-label");
+    articles_count_label.add_css_class("caption");
+    header_box.append(&articles_count_label);
+
+    popover_box.append(&header_box);
+
+    // Currency section placeholder (will be populated asynchronously)
+    let currency_box = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(6)
+        .visible(false)
+        .build();
+    currency_box.add_css_class("popover-currency-section");
+
+    popover_box.append(&currency_box);
+
+    // Load currency data asynchronously
+    if let Some(currency_code) = get_country_currency(country_code) {
+        let currency_box_clone = currency_box.clone();
+        let currency_code = currency_code.to_string();
+        glib::spawn_future_local(async move {
+            if let Some(currency_info) = fetch_currency_info(&currency_code).await {
+                // Currency header
+                let currency_header = gtk::Box::builder()
+                    .orientation(Orientation::Horizontal)
+                    .spacing(8)
+                    .build();
+
+                let currency_label = Label::builder()
+                    .label(&format!("{} to USD", currency_info.code))
+                    .xalign(0.0)
+                    .hexpand(true)
+                    .build();
+                currency_label.add_css_class("title-4");
+
+                let rate_label = Label::builder()
+                    .label(&format!("{:.4}", currency_info.rate_to_usd))
+                    .xalign(1.0)
+                    .build();
+                rate_label.add_css_class("title-4");
+                rate_label.add_css_class("currency-rate");
+
+                currency_header.append(&currency_label);
+                currency_header.append(&rate_label);
+                currency_box_clone.append(&currency_header);
+
+                // Changes row
+                let changes_box = gtk::Box::builder()
+                    .orientation(Orientation::Horizontal)
+                    .spacing(6)
+                    .build();
+
+                if let Some(change_24h) = currency_info.change_24h {
+                    let change_24h_badge = Label::builder()
+                        .label(&format!("24h: {}{:.2}%",
+                            if change_24h >= 0.0 { "+" } else { "" },
+                            change_24h))
+                        .build();
+                    change_24h_badge.add_css_class("badge");
+                    if change_24h >= 0.0 {
+                        change_24h_badge.add_css_class("badge-positive");
+                    } else {
+                        change_24h_badge.add_css_class("badge-negative");
+                    }
+                    changes_box.append(&change_24h_badge);
+                }
+
+                if let Some(change_7d) = currency_info.change_7d {
+                    let change_7d_badge = Label::builder()
+                        .label(&format!("7d: {}{:.2}%",
+                            if change_7d >= 0.0 { "+" } else { "" },
+                            change_7d))
+                        .build();
+                    change_7d_badge.add_css_class("badge");
+                    if change_7d >= 0.0 {
+                        change_7d_badge.add_css_class("badge-positive");
+                    } else {
+                        change_7d_badge.add_css_class("badge-negative");
+                    }
+                    changes_box.append(&change_7d_badge);
+                }
+
+                currency_box_clone.append(&changes_box);
+
+                // Simple sparkline visualization
+                if !currency_info.trend_data.is_empty() {
+                    let sparkline = create_sparkline(&currency_info.trend_data);
+                    currency_box_clone.append(&sparkline);
+                }
+
+                // Show the currency box
+                currency_box_clone.set_visible(true);
+            }
+        });
+    }
+
+    // Separator
+    let separator = gtk::Separator::builder()
+        .orientation(Orientation::Horizontal)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    popover_box.append(&separator);
+
+    // Articles section header
+    let news_header = Label::builder()
+        .label("Recent News")
+        .xalign(0.0)
+        .build();
+    news_header.add_css_class("title-4");
+    popover_box.append(&news_header);
 
     // Create a scrolled window for the articles
     let scrolled = ScrolledWindow::builder()
-        .max_content_height(300)
-        .max_content_width(280)
+        .max_content_height(280)
+        .max_content_width(320)
         .propagate_natural_width(true)
         .propagate_natural_height(true)
         .build();
 
     let articles_box = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(8)
+        .spacing(2)
         .build();
 
     // Sort articles by seendate (most recent first)
     let mut sorted_articles = articles.to_vec();
     sorted_articles.sort_by(|a, b| b.seendate.cmp(&a.seendate));
 
-    // Add each article to the popover
+    // Add each article to the popover - limit to 8 most recent
     eprintln!("  Adding {} articles to popover for {}", sorted_articles.len(), country_code);
-    for article in sorted_articles.iter() {
+    for article in sorted_articles.iter().take(8) {
         let article_widget = create_popover_article_row(article);
         articles_box.append(&article_widget);
     }
@@ -1599,37 +1795,124 @@ fn create_country_marker(
     eprintln!("  Marker added successfully for {}", country_code);
 }
 
+/// Create a simple sparkline visualization for currency trend
+fn create_sparkline(data: &[f64]) -> gtk::DrawingArea {
+    let drawing_area = gtk::DrawingArea::builder()
+        .content_width(280)
+        .content_height(40)
+        .build();
+
+    let data = data.to_vec();
+    drawing_area.set_draw_func(move |_, cr, width, height| {
+        if data.is_empty() {
+            return;
+        }
+
+        let width = width as f64;
+        let height = height as f64;
+
+        // Find min and max for scaling
+        let min = data.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let range = max - min;
+
+        if range == 0.0 {
+            // Draw a flat line if no variation
+            cr.set_source_rgb(0.5, 0.5, 0.5);
+            cr.set_line_width(2.0);
+            cr.move_to(0.0, height / 2.0);
+            cr.line_to(width, height / 2.0);
+            let _ = cr.stroke();
+            return;
+        }
+
+        // Draw the sparkline
+        cr.set_source_rgb(0.5, 0.7, 1.0); // Light blue color
+        cr.set_line_width(2.0);
+
+        let point_spacing = width / (data.len() - 1).max(1) as f64;
+
+        for (i, &value) in data.iter().enumerate() {
+            let x = i as f64 * point_spacing;
+            let y = height - ((value - min) / range) * height;
+
+            if i == 0 {
+                cr.move_to(x, y);
+            } else {
+                cr.line_to(x, y);
+            }
+        }
+
+        let _ = cr.stroke();
+
+        // Draw points
+        cr.set_source_rgb(0.3, 0.5, 0.9);
+        for (i, &value) in data.iter().enumerate() {
+            let x = i as f64 * point_spacing;
+            let y = height - ((value - min) / range) * height;
+            cr.arc(x, y, 3.0, 0.0, 2.0 * std::f64::consts::PI);
+            let _ = cr.fill();
+        }
+    });
+
+    drawing_area
+}
+
 /// Create a compact article row for the popover
 fn create_popover_article_row(article: &GdeltArticle) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(2)
-        .margin_top(4)
-        .margin_bottom(4)
-        .margin_start(4)
-        .margin_end(4)
+        .spacing(4)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(6)
+        .margin_end(6)
         .build();
+    row.add_css_class("popover-article-row");
 
     // Article title
     let title_label = Label::builder()
         .label(&article.title)
         .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .wrap_mode(gtk::pango::WrapMode::Word)
         .xalign(0.0)
-        .max_width_chars(35)
+        .lines(2)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
-    title_label.add_css_class("caption");
-
-    // Domain
-    let domain_label = Label::builder()
-        .label(&article.domain)
-        .xalign(0.0)
-        .build();
-    domain_label.add_css_class("dim-label");
-    domain_label.add_css_class("caption");
+    title_label.add_css_class("popover-article-title");
 
     row.append(&title_label);
-    row.append(&domain_label);
+
+    // Metadata row with domain and time
+    let metadata_box = gtk::Box::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(6)
+        .build();
+
+    // Domain
+    if !article.domain.is_empty() {
+        let domain_label = Label::builder()
+            .label(&article.domain)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .hexpand(true)
+            .build();
+        domain_label.add_css_class("popover-article-meta");
+        metadata_box.append(&domain_label);
+    }
+
+    // Time badge
+    if !article.seendate.is_empty() {
+        let formatted_date = parse_gdelt_timestamp(&article.seendate);
+        let time_label = Label::builder()
+            .label(&formatted_date)
+            .xalign(1.0)
+            .build();
+        time_label.add_css_class("popover-article-time");
+        metadata_box.append(&time_label);
+    }
+
+    row.append(&metadata_box);
 
     // Make the row clickable
     let gesture = gtk::GestureClick::new();
@@ -1645,6 +1928,185 @@ fn create_popover_article_row(article: &GdeltArticle) -> gtk::Box {
     row.add_css_class("activatable");
 
     row
+}
+
+/// Fetch currency information from Frankfurter API
+/// Returns currency info with current rate and trend data
+async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
+    if currency_code == "USD" {
+        // USD is the base, so rate is always 1.0
+        return Some(CurrencyInfo {
+            code: currency_code.to_string(),
+            rate_to_usd: 1.0,
+            change_24h: Some(0.0),
+            change_7d: Some(0.0),
+            trend_data: vec![1.0; 8], // Flat trend for USD
+        });
+    }
+
+    // Get today's date and 7 days ago
+    let today = chrono::Utc::now().date_naive();
+    let seven_days_ago = today - chrono::Duration::days(7);
+    let one_day_ago = today - chrono::Duration::days(1);
+
+    // Fetch latest rate (currency to USD)
+    let latest_url = format!(
+        "https://api.frankfurter.app/latest?from={}&to=USD",
+        currency_code
+    );
+
+    let latest_rate = match reqwest::get(&latest_url).await {
+        Ok(response) => {
+            match response.json::<FrankfurterLatestResponse>().await {
+                Ok(data) => data.rates.rates.get("USD").copied(),
+                Err(e) => {
+                    eprintln!("Failed to parse latest currency data for {}: {}", currency_code, e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to fetch latest currency data for {}: {}", currency_code, e);
+            None
+        }
+    };
+
+    let latest_rate = latest_rate?;
+
+    // Fetch 7-day historical data for trend
+    let historical_url = format!(
+        "https://api.frankfurter.app/{}..{}?from={}&to=USD",
+        seven_days_ago.format("%Y-%m-%d"),
+        today.format("%Y-%m-%d"),
+        currency_code
+    );
+
+    let (change_24h, change_7d, trend_data) = match reqwest::get(&historical_url).await {
+        Ok(response) => {
+            match response.json::<FrankfurterHistoricalResponse>().await {
+                Ok(data) => {
+                    // Extract rates sorted by date
+                    let mut dates: Vec<_> = data.rates.keys().collect();
+                    dates.sort();
+
+                    let rates: Vec<f64> = dates
+                        .iter()
+                        .filter_map(|date| {
+                            data.rates.get(*date).and_then(|r| r.rates.get("USD").copied())
+                        })
+                        .collect();
+
+                    let change_24h = if rates.len() >= 2 {
+                        let yesterday = rates[rates.len() - 2];
+                        Some(((latest_rate - yesterday) / yesterday) * 100.0)
+                    } else {
+                        None
+                    };
+
+                    let change_7d = if !rates.is_empty() {
+                        let week_ago = rates[0];
+                        Some(((latest_rate - week_ago) / week_ago) * 100.0)
+                    } else {
+                        None
+                    };
+
+                    (change_24h, change_7d, rates)
+                }
+                Err(e) => {
+                    eprintln!("Failed to parse historical currency data for {}: {}", currency_code, e);
+                    (None, None, vec![])
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to fetch historical currency data for {}: {}", currency_code, e);
+            (None, None, vec![])
+        }
+    };
+
+    Some(CurrencyInfo {
+        code: currency_code.to_string(),
+        rate_to_usd: latest_rate,
+        change_24h,
+        change_7d,
+        trend_data,
+    })
+}
+
+/// Get the currency code for a country
+/// Returns the ISO 4217 currency code or None if not available
+fn get_country_currency(country: &str) -> Option<&'static str> {
+    let currencies: HashMap<&str, &str> = [
+        // Major countries
+        ("United States", "USD"),
+        ("United Kingdom", "GBP"),
+        ("Canada", "CAD"),
+        ("Australia", "AUD"),
+        ("Germany", "EUR"),
+        ("France", "EUR"),
+        ("Italy", "EUR"),
+        ("Spain", "EUR"),
+        ("Russia", "RUB"),
+        ("China", "CNY"),
+        ("Japan", "JPY"),
+        ("India", "INR"),
+        ("Brazil", "BRL"),
+        ("Mexico", "MXN"),
+        ("Argentina", "ARS"),
+        ("South Africa", "ZAR"),
+        ("Egypt", "EGP"),
+        ("Nigeria", "NGN"),
+        ("Kenya", "KES"),
+        ("Saudi Arabia", "SAR"),
+        ("United Arab Emirates", "AED"),
+        ("Turkey", "TRY"),
+        ("Israel", "ILS"),
+        ("Sweden", "SEK"),
+        ("Norway", "NOK"),
+        ("Finland", "EUR"),
+        ("Denmark", "DKK"),
+        ("Netherlands", "EUR"),
+        ("Belgium", "EUR"),
+        ("Switzerland", "CHF"),
+        ("Austria", "EUR"),
+        ("Poland", "PLN"),
+        ("Czech Republic", "CZK"),
+        ("Greece", "EUR"),
+        ("Portugal", "EUR"),
+        ("Ireland", "EUR"),
+        ("New Zealand", "NZD"),
+        ("Singapore", "SGD"),
+        ("Hong Kong", "HKD"),
+        ("South Korea", "KRW"),
+        ("Thailand", "THB"),
+        ("Malaysia", "MYR"),
+        ("Indonesia", "IDR"),
+        ("Philippines", "PHP"),
+        ("Vietnam", "VND"),
+        ("Ukraine", "UAH"),
+        ("Romania", "RON"),
+        ("Hungary", "HUF"),
+        ("Chile", "CLP"),
+        ("Colombia", "COP"),
+        ("Peru", "PEN"),
+        ("Venezuela", "VES"),
+        ("Pakistan", "PKR"),
+        ("Bangladesh", "BDT"),
+        ("Ethiopia", "ETB"),
+        ("Iran", "IRR"),
+        ("Iraq", "IQD"),
+        ("Afghanistan", "AFN"),
+        ("Qatar", "QAR"),
+        ("Kuwait", "KWD"),
+        ("Oman", "OMR"),
+        ("Lebanon", "LBP"),
+        ("Jordan", "JOD"),
+        ("Syria", "SYP"),
+        ("Yemen", "YER"),
+        ("Taiwan", "TWD"),
+    ].iter().cloned().collect();
+
+    currencies.get(country).copied()
 }
 
 /// Get approximate coordinates for a country code or name
