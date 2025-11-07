@@ -14,13 +14,44 @@ use jetstream_oxide::{
 };
 use atrium_api::record::KnownRecord;
 use atrium_api::types::string::Nsid;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use futures_util::{StreamExt, SinkExt};
+use atrium_api::app::bsky::feed::post::RecordData as PostRecord;
+use atrium_api::app::bsky::embed;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 const APP_ID: &str = "com.toasterrepair.Grapevine";
 const GDELT_API_URL: &str = "https://api.gdeltproject.org/api/v2/doc/doc";
+
+#[derive(Debug, Clone)]
+struct FirehosePost {
+    timestamp: String,
+    did: String,
+    rkey: String,
+    text: String,
+    embed: Option<PostEmbed>,
+    facets: Option<Vec<PostFacet>>,
+}
+
+#[derive(Debug, Clone)]
+enum PostEmbed {
+    Images { count: usize, alt_texts: Vec<String> },
+    External { uri: String, title: String, description: String },
+    Video,
+}
+
+#[derive(Debug, Clone)]
+struct PostFacet {
+    start: usize,
+    end: usize,
+    facet_type: FacetType,
+}
+
+#[derive(Debug, Clone)]
+enum FacetType {
+    Mention(String), // DID
+    Link(String),    // URL
+    Tag(String),     // Hashtag
+}
 
 #[derive(Debug, Deserialize, Clone)]
 struct GdeltArticle {
@@ -618,7 +649,7 @@ struct FirehoseControl {
     root_container: gtk::Box,
     main_pane: SplitPane,
     splits: Rc<RefCell<Vec<SplitPane>>>,
-    message_sender: flume::Sender<String>,
+    message_sender: flume::Sender<FirehosePost>,
     scroll_paused_until: Rc<RefCell<std::time::Instant>>,
 }
 
@@ -826,12 +857,12 @@ impl FirehoseControl {
         });
     }
 
-    fn broadcast_message(&self, message: &str) {
+    fn broadcast_message(&self, post: &FirehosePost) {
         let splits = self.splits.borrow();
         for split in splits.iter() {
             let keyword = split.filter_keyword.borrow().clone();
-            if !keyword.is_empty() && message.to_lowercase().contains(&keyword.to_lowercase()) {
-                add_message_to_list(&split.list, message);
+            if !keyword.is_empty() && post.text.to_lowercase().contains(&keyword.to_lowercase()) {
+                add_message_to_list(&split.list, post);
             }
         }
     }
@@ -886,7 +917,7 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
     container.append(&root_container);
 
     // Create channels for message passing
-    let (tx, rx) = flume::unbounded::<String>();
+    let (tx, rx) = flume::unbounded::<FirehosePost>();
     let main_filter_keyword = Rc::new(RefCell::new(String::new()));
 
     // Create shared state for scroll pause tracking
@@ -926,10 +957,10 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
     let message_buffer = Rc::new(RefCell::new(Vec::new()));
     let message_buffer_clone = message_buffer.clone();
 
-    // Set up receiver to collect incoming messages into buffer
+    // Set up receiver to collect incoming posts into buffer
     glib::spawn_future_local(async move {
-        while let Ok(message) = rx.recv_async().await {
-            message_buffer_clone.borrow_mut().push(message);
+        while let Ok(post) = rx.recv_async().await {
+            message_buffer_clone.borrow_mut().push(post);
         }
     });
 
@@ -943,16 +974,16 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
             let mut buffer = message_buffer.borrow_mut();
 
             if !buffer.is_empty() {
-                // Process all buffered messages
-                for message in buffer.iter() {
+                // Process all buffered posts
+                for post in buffer.iter() {
                     // Add to main list if it matches the main filter
                     let main_keyword = main_filter_keyword_clone.borrow().clone();
-                    if main_keyword.is_empty() || message.to_lowercase().contains(&main_keyword.to_lowercase()) {
-                        add_message_to_list(&main_list_clone, message);
+                    if main_keyword.is_empty() || post.text.to_lowercase().contains(&main_keyword.to_lowercase()) {
+                        add_message_to_list(&main_list_clone, post);
                     }
 
                     // Broadcast to all splits
-                    control_clone.broadcast_message(message);
+                    control_clone.broadcast_message(post);
                 }
 
                 // Clear the buffer
@@ -991,34 +1022,144 @@ fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
     (container, control)
 }
 
-fn add_message_to_list(list: &ListBox, message: &str) {
-    // Parse the message format: [timestamp] rkey: text
-    let parts: Vec<&str> = message.splitn(3, |c| c == '[' || c == ']').collect();
-    let (timestamp, rest) = if parts.len() >= 3 {
-        (parts[1].trim(), parts[2].trim())
-    } else {
-        ("", message)
-    };
-
-    let (rkey, text) = if let Some(colon_pos) = rest.find(':') {
-        let (k, t) = rest.split_at(colon_pos);
-        (k.trim(), t[1..].trim())
-    } else {
-        ("", rest)
-    };
-
-    // Create main container with card styling
+fn add_message_to_list(list: &ListBox, post: &FirehosePost) {
+    // Create main container with card styling (similar to news articles)
     let row = gtk::Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(3)
-        .margin_top(2)
-        .margin_bottom(2)
-        .margin_start(4)
-        .margin_end(4)
+        .spacing(0)
+        .margin_top(4)
+        .margin_bottom(4)
+        .margin_start(6)
+        .margin_end(6)
         .build();
     row.add_css_class("firehose-message");
 
-    // Create header box for metadata (timestamp and rkey)
+    // Handle embeds first (images, external links)
+    if let Some(ref embed) = post.embed {
+        match embed {
+            PostEmbed::Images { count, alt_texts } => {
+                // Create a simple indicator box showing image count and alt text
+                let image_indicator = gtk::Box::builder()
+                    .orientation(Orientation::Vertical)
+                    .spacing(4)
+                    .margin_top(6)
+                    .margin_bottom(6)
+                    .margin_start(8)
+                    .margin_end(8)
+                    .build();
+                image_indicator.add_css_class("popover-currency-section");
+
+                // Image count badge
+                let count_badge = Label::builder()
+                    .label(&format!("🖼️ {} image{}", count, if *count > 1 { "s" } else { "" }))
+                    .xalign(0.0)
+                    .build();
+                count_badge.add_css_class("badge");
+                count_badge.add_css_class("badge-country");
+                image_indicator.append(&count_badge);
+
+                // Show alt text if available
+                for (i, alt) in alt_texts.iter().enumerate() {
+                    if !alt.is_empty() {
+                        let alt_label = Label::builder()
+                            .label(&format!("[{}] {}", i + 1, alt))
+                            .xalign(0.0)
+                            .wrap(true)
+                            .wrap_mode(gtk::pango::WrapMode::WordChar)
+                            .build();
+                        alt_label.add_css_class("caption");
+                        image_indicator.append(&alt_label);
+                    }
+                }
+
+                row.append(&image_indicator);
+            }
+            PostEmbed::External { uri, title, description } => {
+                // Create a compact external link preview
+                let external_box = gtk::Box::builder()
+                    .orientation(Orientation::Vertical)
+                    .spacing(4)
+                    .margin_top(6)
+                    .margin_bottom(6)
+                    .margin_start(8)
+                    .margin_end(8)
+                    .build();
+                external_box.add_css_class("popover-currency-section");
+
+                // Link icon/badge
+                let link_badge = Label::builder()
+                    .label("🔗 External Link")
+                    .xalign(0.0)
+                    .build();
+                link_badge.add_css_class("badge");
+                link_badge.add_css_class("badge-lang");
+                external_box.append(&link_badge);
+
+                // Link title
+                if !title.is_empty() {
+                    let link_title = Label::builder()
+                        .label(title)
+                        .xalign(0.0)
+                        .ellipsize(gtk::pango::EllipsizeMode::End)
+                        .lines(1)
+                        .build();
+                    link_title.add_css_class("caption");
+                    external_box.append(&link_title);
+                }
+
+                // Link description
+                if !description.is_empty() {
+                    let link_desc = Label::builder()
+                        .label(description)
+                        .xalign(0.0)
+                        .ellipsize(gtk::pango::EllipsizeMode::End)
+                        .lines(2)
+                        .build();
+                    link_desc.add_css_class("caption");
+                    link_desc.add_css_class("dim-label");
+                    external_box.append(&link_desc);
+                }
+
+                // Make clickable
+                let gesture = gtk::GestureClick::new();
+                let uri_clone = uri.clone();
+                gesture.connect_released(move |_, _, _, _| {
+                    if let Err(e) = open::that(&uri_clone) {
+                        eprintln!("Failed to open URL: {}", e);
+                    }
+                });
+                external_box.add_controller(gesture);
+                external_box.add_css_class("activatable");
+
+                row.append(&external_box);
+            }
+            PostEmbed::Video => {
+                // Show a video indicator badge
+                let video_badge = Label::builder()
+                    .label("📹 Video")
+                    .margin_start(8)
+                    .margin_end(8)
+                    .margin_top(6)
+                    .margin_bottom(6)
+                    .build();
+                video_badge.add_css_class("badge");
+                video_badge.add_css_class("badge-lang");
+                row.append(&video_badge);
+            }
+        }
+    }
+
+    // Content container with padding
+    let content_box = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(6)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+
+    // Create header box for metadata (timestamp and did/rkey)
     let header = gtk::Box::builder()
         .orientation(Orientation::Horizontal)
         .spacing(6)
@@ -1026,17 +1167,22 @@ fn add_message_to_list(list: &ListBox, message: &str) {
 
     // Timestamp label with monospace font
     let timestamp_label = Label::builder()
-        .label(timestamp)
+        .label(&post.timestamp)
         .xalign(0.0)
         .build();
     timestamp_label.add_css_class("caption");
     timestamp_label.add_css_class("monospace");
-    timestamp_label.add_css_class("dim-label");
     timestamp_label.add_css_class("firehose-timestamp");
 
-    // rkey label with accent color
+    // DID/rkey label with accent color (show last 8 chars of DID + rkey)
+    let did_short = if post.did.len() > 12 {
+        format!("{}...{}", &post.did[..8], &post.rkey[..8.min(post.rkey.len())])
+    } else {
+        post.rkey.clone()
+    };
+
     let rkey_label = Label::builder()
-        .label(rkey)
+        .label(&did_short)
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .max_width_chars(20)
@@ -1047,19 +1193,74 @@ fn add_message_to_list(list: &ListBox, message: &str) {
 
     header.append(&timestamp_label);
     header.append(&rkey_label);
+    content_box.append(&header);
 
-    // Message text with better typography
+    // Show post text
     let message_label = Label::builder()
-        .label(text)
+        .label(&post.text)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .xalign(0.0)
         .selectable(true)
         .build();
     message_label.add_css_class("firehose-text");
+    content_box.append(&message_label);
 
-    row.append(&header);
-    row.append(&message_label);
+    // Show facets as badges if present
+    if let Some(ref facets) = post.facets {
+        if !facets.is_empty() {
+            let facets_box = gtk::Box::builder()
+                .orientation(Orientation::Horizontal)
+                .spacing(4)
+                .margin_top(4)
+                .build();
+
+            // Count facet types
+            let mut mention_count = 0;
+            let mut link_count = 0;
+            let mut tag_count = 0;
+
+            for facet in facets {
+                match &facet.facet_type {
+                    FacetType::Mention(_) => mention_count += 1,
+                    FacetType::Link(_) => link_count += 1,
+                    FacetType::Tag(_) => tag_count += 1,
+                }
+            }
+
+            // Show count badges
+            if mention_count > 0 {
+                let badge = Label::builder()
+                    .label(&format!("@{}", mention_count))
+                    .build();
+                badge.add_css_class("badge");
+                badge.add_css_class("badge-time");
+                facets_box.append(&badge);
+            }
+
+            if link_count > 0 {
+                let badge = Label::builder()
+                    .label(&format!("🔗{}", link_count))
+                    .build();
+                badge.add_css_class("badge");
+                badge.add_css_class("badge-time");
+                facets_box.append(&badge);
+            }
+
+            if tag_count > 0 {
+                let badge = Label::builder()
+                    .label(&format!("#{}", tag_count))
+                    .build();
+                badge.add_css_class("badge");
+                badge.add_css_class("badge-time");
+                facets_box.append(&badge);
+            }
+
+            content_box.append(&facets_box);
+        }
+    }
+
+    row.append(&content_box);
 
     // Prepend to show newest messages at the top
     list.prepend(&row);
@@ -1079,7 +1280,7 @@ fn add_message_to_list(list: &ListBox, message: &str) {
     }
 }
 
-async fn start_jetstream(tx: flume::Sender<String>) -> anyhow::Result<()> {
+async fn start_jetstream(tx: flume::Sender<FirehosePost>) -> anyhow::Result<()> {
     let nsid: Nsid = "app.bsky.feed.post".parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse NSID: {}", e))?;
 
@@ -1103,16 +1304,27 @@ async fn start_jetstream(tx: flume::Sender<String>) -> anyhow::Result<()> {
     while let Ok(event) = receiver.recv_async().await {
         if let JetstreamEvent::Commit(commit_event) = &event {
             match commit_event {
-                CommitEvent::Create { commit, .. } => {
+                CommitEvent::Create { commit, info } => {
                     if let KnownRecord::AppBskyFeedPost(post) = &commit.record {
                         let timestamp = chrono::Utc::now().format("%H:%M:%S").to_string();
-                        let rkey = &commit.info.rkey;
 
-                        // Format: [timestamp] rkey: text
-                        let message = format!("[{}] {}: {}", timestamp, rkey, post.text);
+                        // Parse embeds
+                        let embed = post.embed.as_ref().and_then(|e| parse_embed(e));
+
+                        // Parse facets
+                        let facets = post.facets.as_ref().map(|f| parse_facets(f));
+
+                        let firehose_post = FirehosePost {
+                            timestamp,
+                            did: info.did.to_string(),
+                            rkey: commit.info.rkey.clone(),
+                            text: post.text.clone(),
+                            embed,
+                            facets,
+                        };
 
                         // Send to UI thread
-                        if tx.send(message).is_err() {
+                        if tx.send(firehose_post).is_err() {
                             break; // UI is gone, stop streaming
                         }
                     }
@@ -1123,6 +1335,75 @@ async fn start_jetstream(tx: flume::Sender<String>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_embed(embed: &atrium_api::types::Union<atrium_api::app::bsky::feed::post::RecordEmbedRefs>) -> Option<PostEmbed> {
+    use atrium_api::app::bsky::feed::post::RecordEmbedRefs;
+    use atrium_api::types::Union;
+
+    match embed {
+        Union::Refs(RecordEmbedRefs::AppBskyEmbedImagesMain(images)) => {
+            let count = images.images.len();
+            if count > 0 {
+                // Extract alt text from images
+                let alt_texts: Vec<String> = images.images.iter()
+                    .map(|img| img.alt.clone())
+                    .collect();
+                Some(PostEmbed::Images { count, alt_texts })
+            } else {
+                None
+            }
+        }
+        Union::Refs(RecordEmbedRefs::AppBskyEmbedExternalMain(external)) => {
+            Some(PostEmbed::External {
+                uri: external.external.uri.clone(),
+                title: external.external.title.clone(),
+                description: external.external.description.clone(),
+            })
+        }
+        Union::Refs(RecordEmbedRefs::AppBskyEmbedVideoMain(_video)) => {
+            Some(PostEmbed::Video)
+        }
+        _ => None,
+    }
+}
+
+fn parse_facets(facets: &[atrium_api::app::bsky::richtext::facet::Main]) -> Vec<PostFacet> {
+    use atrium_api::app::bsky::richtext::facet::MainFeaturesItem;
+    use atrium_api::types::Union;
+
+    let mut parsed_facets = Vec::new();
+
+    for facet in facets {
+        let byte_start = facet.index.byte_start as usize;
+        let byte_end = facet.index.byte_end as usize;
+
+        // Check features to determine facet type
+        for feature in &facet.features {
+            let facet_type = match feature {
+                Union::Refs(MainFeaturesItem::Mention(mention_data)) => {
+                    Some(FacetType::Mention(mention_data.did.to_string()))
+                }
+                Union::Refs(MainFeaturesItem::Link(link_data)) => {
+                    Some(FacetType::Link(link_data.uri.clone()))
+                }
+                Union::Refs(MainFeaturesItem::Tag(tag_data)) => {
+                    Some(FacetType::Tag(tag_data.tag.clone()))
+                }
+                _ => None,
+            };
+
+            if let Some(ft) = facet_type {
+                parsed_facets.push(PostFacet {
+                    start: byte_start,
+                    end: byte_end,
+                    facet_type: ft,
+                });
+            }
+        }
+    }
+
+    parsed_facets
 }
 
 async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: Option<libshumate::MarkerLayer>) {
@@ -1947,7 +2228,7 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
     // Get today's date and 7 days ago
     let today = chrono::Utc::now().date_naive();
     let seven_days_ago = today - chrono::Duration::days(7);
-    let one_day_ago = today - chrono::Duration::days(1);
+    let _one_day_ago = today - chrono::Duration::days(1);
 
     // Fetch latest rate (currency to USD)
     let latest_url = format!(
