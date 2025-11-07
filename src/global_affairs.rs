@@ -749,10 +749,14 @@ fn create_country_marker(
 
     // Create a scrolled window for the articles
     let scrolled = ScrolledWindow::builder()
+        .min_content_height(120)
         .max_content_height(280)
         .max_content_width(320)
         .propagate_natural_width(true)
-        .propagate_natural_height(true)
+        .propagate_natural_height(false)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
         .build();
 
     let articles_box = gtk::Box::builder()
@@ -875,10 +879,12 @@ fn create_popover_article_row(article: &GdeltArticle) -> gtk::Box {
     let title_label = Label::builder()
         .label(&article.title)
         .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::Word)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
         .xalign(0.0)
         .lines(2)
         .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(45)
+        .width_chars(45)
         .build();
     title_label.add_css_class("popover-article-title");
 
