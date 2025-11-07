@@ -7,12 +7,13 @@ use std::rc::Rc;
 use chrono::NaiveDateTime;
 
 use crate::data::{GdeltArticle, GdeltResponse, CurrencyInfo, GDELT_API_URL};
-use crate::coordinates::{get_country_coordinates, get_country_currency};
+use crate::coordinates::{get_country_coordinates, get_country_currency, get_country_timezone};
 
 pub fn create_global_affairs_view(
     current_query: Rc<RefCell<String>>,
     results_list_ref: Rc<RefCell<Option<ListBox>>>,
     marker_layer_ref: Rc<RefCell<Option<libshumate::MarkerLayer>>>,
+    use_12_hour: Rc<RefCell<bool>>,
 ) -> gtk::Box {
     // Create a responsive container that switches orientation based on window size
     let container = gtk::Box::builder()
@@ -97,23 +98,26 @@ pub fn create_global_affairs_view(
     // Clone marker layer for use in async callback
     let marker_layer_clone = marker_layer_opt.clone();
     let results_list_clone = results_list.clone();
+    let use_12_hour_clone = use_12_hour.clone();
 
     // Perform initial search with empty query to get latest news
     glib::spawn_future_local(async move {
-        fetch_gdelt_articles("", results_list_clone, marker_layer_clone).await;
+        fetch_gdelt_articles("", results_list_clone, marker_layer_clone, use_12_hour_clone).await;
     });
 
     // Set up automatic refresh every 15 minutes
     let current_query_for_refresh = current_query.clone();
     let results_list_for_refresh = results_list.clone();
     let marker_layer_for_refresh = marker_layer_opt.clone();
+    let use_12_hour_for_refresh = use_12_hour.clone();
     glib::timeout_add_seconds_local(15 * 60, move || {
         let query = current_query_for_refresh.borrow().clone();
         let results_list = results_list_for_refresh.clone();
         let marker_layer = marker_layer_for_refresh.clone();
+        let use_12_hour = use_12_hour_for_refresh.clone();
 
         glib::spawn_future_local(async move {
-            fetch_gdelt_articles(&query, results_list, marker_layer).await;
+            fetch_gdelt_articles(&query, results_list, marker_layer, use_12_hour).await;
         });
 
         glib::ControlFlow::Continue
@@ -123,6 +127,7 @@ pub fn create_global_affairs_view(
     let results_list_for_search = results_list.clone();
     let marker_layer_for_search = marker_layer_opt.clone();
     let current_query_for_search = current_query.clone();
+    let use_12_hour_for_search = use_12_hour.clone();
     search_entry.connect_activate(move |entry| {
         let query = entry.text().to_string();
 
@@ -131,9 +136,10 @@ pub fn create_global_affairs_view(
 
         let results_list = results_list_for_search.clone();
         let marker_layer = marker_layer_for_search.clone();
+        let use_12_hour = use_12_hour_for_search.clone();
 
         glib::spawn_future_local(async move {
-            fetch_gdelt_articles(&query, results_list, marker_layer).await;
+            fetch_gdelt_articles(&query, results_list, marker_layer, use_12_hour).await;
         });
     });
 
@@ -185,7 +191,7 @@ pub fn create_global_affairs_view(
     container
 }
 
-async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: Option<libshumate::MarkerLayer>) {
+async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: Option<libshumate::MarkerLayer>, use_12_hour: Rc<RefCell<bool>>) {
     // Clear existing results
     while let Some(child) = results_list.first_child() {
         results_list.remove(&child);
@@ -257,14 +263,14 @@ async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: 
                     // Try to parse the JSON
                     match serde_json::from_str::<GdeltResponse>(&text) {
                         Ok(data) => {
-                            process_gdelt_articles(data, results_list, marker_layer, marker_buttons_map);
+                            process_gdelt_articles(data, results_list, marker_layer, marker_buttons_map, use_12_hour.clone());
                         }
                         Err(e) => {
                             // Try parsing as a direct array of articles
                             match serde_json::from_str::<Vec<GdeltArticle>>(&text) {
                                 Ok(articles) => {
                                     let data = GdeltResponse { articles };
-                                    process_gdelt_articles(data, results_list, marker_layer, marker_buttons_map);
+                                    process_gdelt_articles(data, results_list, marker_layer, marker_buttons_map, use_12_hour.clone());
                                 }
                                 Err(_) => {
                                     // Clear all children (including loading indicator)
@@ -321,6 +327,7 @@ fn process_gdelt_articles(
     results_list: ListBox,
     marker_layer: Option<libshumate::MarkerLayer>,
     marker_buttons_map: Rc<RefCell<HashMap<String, gtk::Button>>>,
+    use_12_hour: Rc<RefCell<bool>>,
 ) {
     // Clear all children (including loading indicator)
     while let Some(child) = results_list.first_child() {
@@ -378,7 +385,7 @@ fn process_gdelt_articles(
                 if let Some((lat, lon)) = get_country_coordinates(country_code) {
                     eprintln!("Creating marker for {} with {} articles at ({}, {})",
                              country_code, articles.len(), lat, lon);
-                    create_country_marker(layer, country_code, lat, lon, articles, marker_buttons_map.clone());
+                    create_country_marker(layer, country_code, lat, lon, articles, marker_buttons_map.clone(), use_12_hour.clone());
                 } else {
                     eprintln!("No coordinates found for country code: {}", country_code);
                 }
@@ -578,7 +585,8 @@ fn create_country_marker(
     lat: f64,
     lon: f64,
     articles: &[GdeltArticle],
-    marker_buttons_map: Rc<RefCell<HashMap<String, gtk::Button>>>
+    marker_buttons_map: Rc<RefCell<HashMap<String, gtk::Button>>>,
+    use_12_hour: Rc<RefCell<bool>>,
 ) {
     eprintln!("  Creating marker button for {}", country_code);
 
@@ -618,18 +626,36 @@ fn create_country_marker(
         .margin_end(10)
         .build();
 
-    // Header with country name
+    // Header with country name and local time
     let header_box = gtk::Box::builder()
         .orientation(Orientation::Vertical)
         .spacing(4)
         .build();
 
+    // Country name and time row
+    let country_time_row = gtk::Box::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(8)
+        .build();
+
     let country_label = Label::builder()
         .label(country_code)
         .xalign(0.0)
+        .hexpand(true)
         .build();
     country_label.add_css_class("title-3");
-    header_box.append(&country_label);
+    country_time_row.append(&country_label);
+
+    // Create time label that will be updated every second
+    let time_label = Label::builder()
+        .label("--:--:--")
+        .xalign(1.0)
+        .build();
+    time_label.add_css_class("monospace");
+    time_label.add_css_class("dim-label");
+    country_time_row.append(&time_label);
+
+    header_box.append(&country_time_row);
 
     let articles_count_label = Label::builder()
         .label(&format!("{} articles", articles.len()))
@@ -640,6 +666,31 @@ fn create_country_marker(
     header_box.append(&articles_count_label);
 
     popover_box.append(&header_box);
+
+    // Set up timezone and time update
+    if let Some(tz_str) = get_country_timezone(country_code) {
+        if let Ok(tz) = tz_str.parse::<chrono_tz::Tz>() {
+            // Update time immediately
+            let time_label_clone = time_label.clone();
+            let use_12_hour_clone = use_12_hour.clone();
+            let update_time = move || {
+                let now = chrono::Utc::now().with_timezone(&tz);
+                let time_str = if *use_12_hour_clone.borrow() {
+                    now.format("%I:%M:%S %p").to_string()
+                } else {
+                    now.format("%H:%M:%S").to_string()
+                };
+                time_label_clone.set_label(&time_str);
+            };
+            update_time();
+
+            // Update every second
+            glib::timeout_add_seconds_local(1, move || {
+                update_time();
+                glib::ControlFlow::Continue
+            });
+        }
+    }
 
     // Currency section placeholder (will be populated asynchronously)
     let currency_box = gtk::Box::builder()

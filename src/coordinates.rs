@@ -1,5 +1,81 @@
 use std::collections::HashMap;
 
+/// Get the timezone for a country
+/// Returns the timezone string (e.g., "America/New_York") or None if not available
+pub fn get_country_timezone(country: &str) -> Option<&'static str> {
+    let timezones: HashMap<&str, &str> = [
+        // Major countries
+        ("United States", "America/New_York"),
+        ("United Kingdom", "Europe/London"),
+        ("Canada", "America/Toronto"),
+        ("Australia", "Australia/Sydney"),
+        ("Germany", "Europe/Berlin"),
+        ("France", "Europe/Paris"),
+        ("Italy", "Europe/Rome"),
+        ("Spain", "Europe/Madrid"),
+        ("Russia", "Europe/Moscow"),
+        ("China", "Asia/Shanghai"),
+        ("Japan", "Asia/Tokyo"),
+        ("India", "Asia/Kolkata"),
+        ("Brazil", "America/Sao_Paulo"),
+        ("Mexico", "America/Mexico_City"),
+        ("Argentina", "America/Argentina/Buenos_Aires"),
+        ("South Africa", "Africa/Johannesburg"),
+        ("Egypt", "Africa/Cairo"),
+        ("Nigeria", "Africa/Lagos"),
+        ("Kenya", "Africa/Nairobi"),
+        ("Saudi Arabia", "Asia/Riyadh"),
+        ("United Arab Emirates", "Asia/Dubai"),
+        ("Turkey", "Europe/Istanbul"),
+        ("Israel", "Asia/Jerusalem"),
+        ("Sweden", "Europe/Stockholm"),
+        ("Norway", "Europe/Oslo"),
+        ("Finland", "Europe/Helsinki"),
+        ("Denmark", "Europe/Copenhagen"),
+        ("Netherlands", "Europe/Amsterdam"),
+        ("Belgium", "Europe/Brussels"),
+        ("Switzerland", "Europe/Zurich"),
+        ("Austria", "Europe/Vienna"),
+        ("Poland", "Europe/Warsaw"),
+        ("Czech Republic", "Europe/Prague"),
+        ("Greece", "Europe/Athens"),
+        ("Portugal", "Europe/Lisbon"),
+        ("Ireland", "Europe/Dublin"),
+        ("New Zealand", "Pacific/Auckland"),
+        ("Singapore", "Asia/Singapore"),
+        ("Hong Kong", "Asia/Hong_Kong"),
+        ("South Korea", "Asia/Seoul"),
+        ("Thailand", "Asia/Bangkok"),
+        ("Malaysia", "Asia/Kuala_Lumpur"),
+        ("Indonesia", "Asia/Jakarta"),
+        ("Philippines", "Asia/Manila"),
+        ("Vietnam", "Asia/Ho_Chi_Minh"),
+        ("Ukraine", "Europe/Kiev"),
+        ("Romania", "Europe/Bucharest"),
+        ("Hungary", "Europe/Budapest"),
+        ("Chile", "America/Santiago"),
+        ("Colombia", "America/Bogota"),
+        ("Peru", "America/Lima"),
+        ("Venezuela", "America/Caracas"),
+        ("Pakistan", "Asia/Karachi"),
+        ("Bangladesh", "Asia/Dhaka"),
+        ("Ethiopia", "Africa/Addis_Ababa"),
+        ("Iran", "Asia/Tehran"),
+        ("Iraq", "Asia/Baghdad"),
+        ("Afghanistan", "Asia/Kabul"),
+        ("Qatar", "Asia/Qatar"),
+        ("Kuwait", "Asia/Kuwait"),
+        ("Oman", "Asia/Muscat"),
+        ("Lebanon", "Asia/Beirut"),
+        ("Jordan", "Asia/Amman"),
+        ("Syria", "Asia/Damascus"),
+        ("Yemen", "Asia/Aden"),
+        ("Taiwan", "Asia/Taipei"),
+    ].iter().cloned().collect();
+
+    timezones.get(country).copied()
+}
+
 /// Get the currency code for a country
 /// Returns the ISO 4217 currency code or None if not available
 pub fn get_country_currency(country: &str) -> Option<&'static str> {

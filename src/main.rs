@@ -48,11 +48,15 @@ fn build_ui(app: &Application) {
     let results_list_ref = Rc::new(RefCell::new(None::<gtk::ListBox>));
     let marker_layer_ref = Rc::new(RefCell::new(None::<libshumate::MarkerLayer>));
 
+    // State to track 12/24 hour format (default to 12-hour)
+    let use_12_hour = Rc::new(RefCell::new(true));
+
     // Create Global Affairs view with map
     let global_affairs_view = create_global_affairs_view(
         current_query.clone(),
         results_list_ref.clone(),
-        marker_layer_ref.clone()
+        marker_layer_ref.clone(),
+        use_12_hour.clone()
     );
     let _global_affairs_page = stack.add_titled(&global_affairs_view, Some("global-affairs"), "Global Affairs");
     stack.page(&global_affairs_view).set_icon_name(None);
@@ -89,9 +93,6 @@ fn build_ui(app: &Application) {
         .build();
     time_label.add_css_class("monospace");
     time_label.add_css_class("time-display");
-
-    // State to track 12/24 hour format (default to 12-hour)
-    let use_12_hour = Rc::new(RefCell::new(true));
 
     // Make the time label clickable to toggle between 12/24 hour format
     let time_label_gesture = gtk::GestureClick::new();
