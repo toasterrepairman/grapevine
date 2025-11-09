@@ -191,7 +191,7 @@ pub fn create_global_affairs_view(
     container
 }
 
-async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: Option<libshumate::MarkerLayer>, use_12_hour: Rc<RefCell<bool>>) {
+pub async fn fetch_gdelt_articles(query: &str, results_list: ListBox, marker_layer: Option<libshumate::MarkerLayer>, use_12_hour: Rc<RefCell<bool>>) {
     // Clear existing results
     while let Some(child) = results_list.first_child() {
         results_list.remove(&child);

@@ -120,14 +120,18 @@ fn build_ui(app: &Application) {
     let current_query_clone = current_query.clone();
     let results_list_ref_clone = results_list_ref.clone();
     let marker_layer_ref_clone = marker_layer_ref.clone();
+    let use_12_hour_clone = use_12_hour.clone();
     refresh_button.connect_clicked(move |_| {
         let query = current_query_clone.borrow().clone();
         if let Some(results_list) = results_list_ref_clone.borrow().as_ref() {
             let results_list = results_list.clone();
             let marker_layer = marker_layer_ref_clone.borrow().clone();
-            // We need to call fetch_gdelt_articles, but it's in the global_affairs module
-            // For now, this will just trigger a refresh via the search entry
-            eprintln!("Refresh triggered for query: {}", query);
+            let use_12_hour = use_12_hour_clone.clone();
+
+            // Trigger the actual search by calling fetch_gdelt_articles
+            glib::spawn_future_local(async move {
+                global_affairs::fetch_gdelt_articles(&query, results_list, marker_layer, use_12_hour).await;
+            });
         }
     });
 
