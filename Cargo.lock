@@ -799,6 +799,7 @@ dependencies = [
  "dirs",
  "flume",
  "futures-util",
+ "gdk4",
  "gtk4",
  "iana-time-zone",
  "jetstream-oxide",

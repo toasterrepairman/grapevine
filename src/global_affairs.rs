@@ -1,5 +1,6 @@
 use gtk::prelude::*;
-use gtk::{glib, Label, Orientation, ScrolledWindow, ListBox, SearchEntry, Popover};
+use gtk::{glib, Label, Orientation, ScrolledWindow, ListBox, SearchEntry, Popover, EventControllerKey};
+use gdk::{Key, ModifierType};
 use libshumate::prelude::{MarkerExt, LocationExt};
 use std::collections::HashMap;
 use std::cell::RefCell;
@@ -29,15 +30,12 @@ pub fn create_global_affairs_view(
     let scrollbox_content = gtk::Box::builder()
         .orientation(Orientation::Vertical)
         .spacing(12)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
         .build();
 
-    // Create search entry for GDELT queries
+    // Create search entry for GDELT queries (hidden by default)
     let search_entry = SearchEntry::builder()
         .placeholder_text("Search GDELT news...")
+        .visible(false)
         .build();
 
     // Create a list box for search results
@@ -186,6 +184,23 @@ pub fn create_global_affairs_view(
         }
         glib::ControlFlow::Continue
     });
+
+    // Set up keyboard shortcut for toggling search (Ctrl+F)
+    let search_entry_clone = search_entry.clone();
+    let key_controller = EventControllerKey::new();
+    key_controller.connect_key_pressed(move |_, key, _, modifier| {
+        if key == Key::f && modifier == ModifierType::CONTROL_MASK {
+            let is_visible = search_entry_clone.is_visible();
+            search_entry_clone.set_visible(!is_visible);
+            if !is_visible {
+                search_entry_clone.grab_focus();
+            }
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    container.add_controller(key_controller);
 
     container.append(&paned);
     container
@@ -425,23 +440,39 @@ fn create_article_row_with_markers(
 
         card.append(&picture);
 
-        // Load image from URL asynchronously
+        // Load image from URL asynchronously with better error handling
         let url = article.socialimage.clone();
         let picture_clone = picture.clone();
         glib::spawn_future_local(async move {
-            match reqwest::get(&url).await {
-                Ok(response) => {
-                    if let Ok(bytes) = response.bytes().await {
-                        let bytes_vec = bytes.to_vec();
-                        let bytes = glib::Bytes::from(&bytes_vec);
-                        if let Ok(texture) = gtk::gdk::Texture::from_bytes(&bytes) {
-                            picture_clone.set_paintable(Some(&texture));
-                            picture_clone.set_visible(true);
+            // Create client with timeout
+            if let Ok(client) = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .build()
+            {
+                match client.get(&url).send().await {
+                    Ok(response) => {
+                        if response.status().is_success() {
+                            match response.bytes().await {
+                                Ok(bytes) => {
+                                    let bytes_vec = bytes.to_vec();
+                                    let glib_bytes = glib::Bytes::from_owned(bytes_vec);
+                                    if let Ok(texture) = gtk::gdk::Texture::from_bytes(&glib_bytes) {
+                                        picture_clone.set_paintable(Some(&texture));
+                                        picture_clone.set_visible(true);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to read image bytes for {}: {}", url, e);
+                                }
+                            }
+                        } else {
+                            eprintln!("HTTP error loading image {}: {}", url, response.status());
                         }
                     }
-                }
-                Err(e) => {
-                    eprintln!("Failed to load image: {}", e);
+                    Err(e) => {
+                        eprintln!("Failed to fetch image {}: {}", url, e);
+                    }
                 }
             }
         });
@@ -847,13 +878,22 @@ fn create_country_marker(
     popover_box.append(&scrolled);
 
     popover.set_child(Some(&popover_box));
-    popover.set_parent(&marker_button);
 
     // Connect button click to show popover
     let country_code_clone = country_code.to_string();
+    let popover_clone = popover.clone();
     marker_button.connect_clicked(move |_| {
         eprintln!("Marker clicked for {}", country_code_clone);
-        popover.popup();
+        popover_clone.popup();
+    });
+
+    // Set popover parent after connecting click handler
+    popover.set_parent(&marker_button);
+
+    // Clean up popover when button is destroyed
+    let popover_for_cleanup = popover.clone();
+    marker_button.connect_destroy(move |_| {
+        popover_for_cleanup.unparent();
     });
 
     // Create the marker
@@ -1173,9 +1213,16 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
             rate_to_usd: 1.0,
             change_24h: Some(0.0),
             change_7d: Some(0.0),
-            trend_data: vec![1.0; 8], // Flat trend for USD
+            trend_data: vec![1.0; 14], // Flat trend for USD
         });
     }
+
+    // Create a client with timeout and retry settings
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
 
     // Get today's date and 14 days ago (for better trend visualization)
     let today = chrono::Utc::now().date_naive();
@@ -1187,14 +1234,19 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
         currency_code
     );
 
-    let latest_rate = match reqwest::get(&latest_url).await {
+    let latest_rate = match client.get(&latest_url).send().await {
         Ok(response) => {
-            match response.json::<FrankfurterLatestResponse>().await {
-                Ok(data) => data.rates.rates.get("USD").copied(),
-                Err(e) => {
-                    eprintln!("Failed to parse latest currency data for {}: {}", currency_code, e);
-                    None
+            if response.status().is_success() {
+                match response.json::<FrankfurterLatestResponse>().await {
+                    Ok(data) => data.rates.rates.get("USD").copied(),
+                    Err(e) => {
+                        eprintln!("Failed to parse latest currency data for {}: {}", currency_code, e);
+                        None
+                    }
                 }
+            } else {
+                eprintln!("HTTP error fetching latest currency data for {}: {}", currency_code, response.status());
+                None
             }
         }
         Err(e) => {
@@ -1205,7 +1257,7 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
 
     let latest_rate = latest_rate?;
 
-    // Fetch 14-day historical data for trend
+    // Fetch 14-day historical data for trend with better error handling
     let historical_url = format!(
         "https://api.frankfurter.app/{}..{}?from={}&to=USD",
         fourteen_days_ago.format("%Y-%m-%d"),
@@ -1213,41 +1265,46 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
         currency_code
     );
 
-    let (change_24h, change_7d, trend_data) = match reqwest::get(&historical_url).await {
+    let (change_24h, change_7d, trend_data) = match client.get(&historical_url).send().await {
         Ok(response) => {
-            match response.json::<FrankfurterHistoricalResponse>().await {
-                Ok(data) => {
-                    // Extract rates sorted by date
-                    let mut dates: Vec<_> = data.rates.keys().collect();
-                    dates.sort();
+            if response.status().is_success() {
+                match response.json::<FrankfurterHistoricalResponse>().await {
+                    Ok(data) => {
+                        // Extract rates sorted by date
+                        let mut dates: Vec<_> = data.rates.keys().collect();
+                        dates.sort();
 
-                    let rates: Vec<f64> = dates
-                        .iter()
-                        .filter_map(|date| {
-                            data.rates.get(*date).and_then(|r| r.rates.get("USD").copied())
-                        })
-                        .collect();
+                        let rates: Vec<f64> = dates
+                            .iter()
+                            .filter_map(|date| {
+                                data.rates.get(*date).and_then(|r| r.rates.get("USD").copied())
+                            })
+                            .collect();
 
-                    let change_24h = if rates.len() >= 2 {
-                        let yesterday = rates[rates.len() - 2];
-                        Some(((latest_rate - yesterday) / yesterday) * 100.0)
-                    } else {
-                        None
-                    };
+                        let change_24h = if rates.len() >= 2 {
+                            let yesterday = rates[rates.len() - 2];
+                            Some(((latest_rate - yesterday) / yesterday) * 100.0)
+                        } else {
+                            None
+                        };
 
-                    let change_7d = if !rates.is_empty() {
-                        let week_ago = rates[0];
-                        Some(((latest_rate - week_ago) / week_ago) * 100.0)
-                    } else {
-                        None
-                    };
+                        let change_7d = if !rates.is_empty() {
+                            let week_ago = rates[0];
+                            Some(((latest_rate - week_ago) / week_ago) * 100.0)
+                        } else {
+                            None
+                        };
 
-                    (change_24h, change_7d, rates)
+                        (change_24h, change_7d, rates)
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to parse historical currency data for {}: {}", currency_code, e);
+                        (None, None, vec![])
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Failed to parse historical currency data for {}: {}", currency_code, e);
-                    (None, None, vec![])
-                }
+            } else {
+                eprintln!("HTTP error fetching historical currency data for {}: {}", currency_code, response.status());
+                (None, None, vec![])
             }
         }
         Err(e) => {

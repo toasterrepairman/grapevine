@@ -37,10 +37,6 @@ impl FirehoseControl {
         let split_box = gtk::Box::builder()
             .orientation(Orientation::Vertical)
             .spacing(8)
-            .margin_top(12)
-            .margin_bottom(12)
-            .margin_start(12)
-            .margin_end(12)
             .hexpand(true)
             .build();
 
@@ -261,10 +257,6 @@ pub fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
     let main_box = gtk::Box::builder()
         .orientation(Orientation::Vertical)
         .spacing(8)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
         .hexpand(true)
         .vexpand(true)
         .build();
