@@ -746,7 +746,11 @@ fn create_country_marker(
                     .build();
 
                 let currency_label = Label::builder()
-                    .label(&format!("{} to USD", currency_info.code))
+                    .label(&if currency_info.code == "USD" {
+                        "EUR to USD".to_string()
+                    } else {
+                        format!("{} to USD", currency_info.code)
+                    })
                     .xalign(0.0)
                     .hexpand(true)
                     .build();
@@ -1206,17 +1210,6 @@ fn create_popover_article_row(article: &GdeltArticle) -> gtk::Box {
 async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
     use crate::data::{FrankfurterLatestResponse, FrankfurterHistoricalResponse};
 
-    if currency_code == "USD" {
-        // USD is the base, so rate is always 1.0
-        return Some(CurrencyInfo {
-            code: currency_code.to_string(),
-            rate_to_usd: 1.0,
-            change_24h: Some(0.0),
-            change_7d: Some(0.0),
-            trend_data: vec![1.0; 14], // Flat trend for USD
-        });
-    }
-
     // Create a client with timeout and retry settings
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -1228,29 +1221,37 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
     let today = chrono::Utc::now().date_naive();
     let fourteen_days_ago = today - chrono::Duration::days(14);
 
-    // Fetch latest rate (currency to USD)
+    let (base_currency, target_currency) = if currency_code == "USD" {
+        // When US is selected, show EUR/USD pair
+        ("EUR", "USD")
+    } else {
+        // For other currencies, show currency/USD pair
+        (currency_code, "USD")
+    };
+
+    // Fetch latest rate
     let latest_url = format!(
-        "https://api.frankfurter.app/latest?from={}&to=USD",
-        currency_code
+        "https://api.frankfurter.dev/v1/latest?from={}&to={}",
+        base_currency, target_currency
     );
 
     let latest_rate = match client.get(&latest_url).send().await {
         Ok(response) => {
             if response.status().is_success() {
                 match response.json::<FrankfurterLatestResponse>().await {
-                    Ok(data) => data.rates.rates.get("USD").copied(),
+                    Ok(data) => data.rates.rates.get(target_currency).copied(),
                     Err(e) => {
-                        eprintln!("Failed to parse latest currency data for {}: {}", currency_code, e);
+                        eprintln!("Failed to parse latest currency data for {}/{}: {}", base_currency, target_currency, e);
                         None
                     }
                 }
             } else {
-                eprintln!("HTTP error fetching latest currency data for {}: {}", currency_code, response.status());
+                eprintln!("HTTP error fetching latest currency data for {}/{}: {}", base_currency, target_currency, response.status());
                 None
             }
         }
         Err(e) => {
-            eprintln!("Failed to fetch latest currency data for {}: {}", currency_code, e);
+            eprintln!("Failed to fetch latest currency data for {}/{}: {}", base_currency, target_currency, e);
             None
         }
     };
@@ -1259,10 +1260,10 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
 
     // Fetch 14-day historical data for trend with better error handling
     let historical_url = format!(
-        "https://api.frankfurter.app/{}..{}?from={}&to=USD",
+        "https://api.frankfurter.dev/v1/{}..{}?from={}&to={}",
         fourteen_days_ago.format("%Y-%m-%d"),
         today.format("%Y-%m-%d"),
-        currency_code
+        base_currency, target_currency
     );
 
     let (change_24h, change_7d, trend_data) = match client.get(&historical_url).send().await {
@@ -1277,7 +1278,7 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
                         let rates: Vec<f64> = dates
                             .iter()
                             .filter_map(|date| {
-                                data.rates.get(*date).and_then(|r| r.rates.get("USD").copied())
+                                data.rates.get(*date).and_then(|r| r.rates.get(target_currency).copied())
                             })
                             .collect();
 
@@ -1298,17 +1299,17 @@ async fn fetch_currency_info(currency_code: &str) -> Option<CurrencyInfo> {
                         (change_24h, change_7d, rates)
                     }
                     Err(e) => {
-                        eprintln!("Failed to parse historical currency data for {}: {}", currency_code, e);
+                        eprintln!("Failed to parse historical currency data for {}/{}: {}", base_currency, target_currency, e);
                         (None, None, vec![])
                     }
                 }
             } else {
-                eprintln!("HTTP error fetching historical currency data for {}: {}", currency_code, response.status());
+                eprintln!("HTTP error fetching historical currency data for {}/{}: {}", base_currency, target_currency, response.status());
                 (None, None, vec![])
             }
         }
         Err(e) => {
-            eprintln!("Failed to fetch historical currency data for {}: {}", currency_code, e);
+            eprintln!("Failed to fetch historical currency data for {}/{}: {}", base_currency, target_currency, e);
             (None, None, vec![])
         }
     };
