@@ -36,6 +36,8 @@ pub fn create_global_affairs_view(
     let search_entry = SearchEntry::builder()
         .placeholder_text("Search GDELT news...")
         .visible(false)
+        .margin_start(8)
+        .margin_end(8)
         .build();
 
     // Create a list box for search results

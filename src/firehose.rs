@@ -49,11 +49,14 @@ impl FirehoseControl {
         let search_entry = SearchEntry::builder()
             .placeholder_text("Filter messages by keyword...")
             .hexpand(true)
+            .margin_start(8)
+            .margin_end(0)
             .build();
 
         let close_button = gtk::Button::builder()
             .icon_name("window-close-symbolic")
             .tooltip_text("Close this split")
+            .margin_end(8)
             .build();
 
         header_box.append(&search_entry);
@@ -263,6 +266,8 @@ pub fn create_firehose_view() -> (gtk::Box, FirehoseControl) {
 
     let main_search = SearchEntry::builder()
         .placeholder_text("Filter messages by keyword...")
+        .margin_start(8)
+        .margin_end(8)
         .build();
 
     // Create the main firehose list
